@@ -57,6 +57,24 @@ merchant fixes their server, "Send again" on a delivery re-queues it.
 minutes after starting, then at growing intervals, for 24 hours). "Ask the provider
 again" on the order does it at once.
 
+**Someone cannot get past the two-factor step.** A phone whose clock is wrong makes
+every code wrong: have them set the time to automatic. A lost phone: one of their
+recovery codes signs in, and then they switch two-factor off and set it up again under
+Your account. With the recovery codes gone as well, nothing they can do themselves will
+get them in, on purpose: a password reset does not bypass the second factor. Make sure
+who is asking, then:
+
+```bash
+bdpay-cloud disable-two-factor --email person@example.com
+```
+
+Their sessions end, their password is unchanged, and the audit log records it as
+`user.two_factor_reset`.
+
+**"Too many failed attempts".** Eight wrong passwords or codes lock an account for 15
+minutes. It unlocks by itself. A password reset clears the lock only for an account
+without two-factor.
+
 ## Rotating the master key
 
 ```bash
@@ -67,12 +85,15 @@ bdpay-cloud rotate-keys                   # re-encrypts everything with the new 
 # 3. When it reports success, remove the old entry and roll out again.
 ```
 
-`rotate-keys` reports any value that no key in the ring can read and leaves it
-untouched, so one damaged row cannot block a rotation. Do not remove old keys while it
-reports unreadable values.
+`rotate-keys` re-encrypts gateway credentials, callback and webhook secrets, and the
+two-factor secrets of dashboard users. It reports any value that no key in the ring can
+read and leaves it untouched, so one damaged row cannot block a rotation. Do not remove
+old keys while it reports unreadable values.
 
 If the keys are lost, stored gateway credentials and webhook secrets cannot be
-recovered: every workspace has to enter its credentials again.
+recovered: every workspace has to enter its credentials again. Two-factor secrets are
+lost with them: codes from the app can no longer be checked, a recovery code still
+signs in, and `disable-two-factor` clears the way for anyone who has none left.
 
 ## Suspending a workspace
 
@@ -90,6 +111,7 @@ bdpay-cloud doctor
 bdpay-cloud gen-key [--id]
 bdpay-cloud rotate-keys
 bdpay-cloud create-user --email --name [--workspace] [--platform-admin] [--password-stdin]
+bdpay-cloud disable-two-factor --email
 bdpay-cloud seed-demo --workspace <slug>       development only
 bdpay-cloud make-migration -m <message>       development only
 bdpay-cloud openapi
