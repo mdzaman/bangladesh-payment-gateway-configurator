@@ -12,6 +12,7 @@ export interface User {
   email: string;
   name: string;
   email_verified: boolean;
+  two_factor_enabled: boolean;
   is_platform_admin: boolean;
   created_at: string;
 }
@@ -25,6 +26,8 @@ export interface Workspace {
   support_email: string;
   support_phone: string;
   locale: string;
+  /** Members need two-factor sign-in before they can change anything in live mode. */
+  require_two_factor: boolean;
   live_status: "inactive" | "pending" | "active";
   live_activated_at: string | null;
   suspended: boolean;
@@ -36,6 +39,28 @@ export interface Me {
   user: User;
   csrf_token: string;
   workspaces: Workspace[];
+}
+
+/** The password was right; a code is still owed before there is a session. */
+export interface TwoFactorChallenge {
+  two_factor_required: true;
+  challenge: string;
+  expires_in: number;
+}
+
+export interface TwoFactorStatus {
+  enabled: boolean;
+  enabled_at: string | null;
+  recovery_codes_left: number;
+}
+
+export interface TwoFactorSetup {
+  /** Base32, for typing into an authenticator app by hand. */
+  secret: string;
+  /** The same thing as an otpauth:// link, for the QR code. */
+  otpauth_uri: string;
+  /** Seconds this set-up waits for its first code before it has to be started again. */
+  expires_in: number;
 }
 
 export interface Platform {
@@ -344,6 +369,8 @@ export interface Member {
   role: Role;
   joined_at: string;
   you: boolean;
+  /** null when this person's role does not let them see it. */
+  two_factor: boolean | null;
 }
 
 export interface Invitation {

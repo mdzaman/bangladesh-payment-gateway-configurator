@@ -241,8 +241,9 @@ export function PageHead({ title, children, actions }: { title: string; children
 }
 
 /** Explains why a control is disabled for this person's role. */
-export function ReadOnlyNote({ show, live }: { show: boolean; live: boolean }) {
-  if (!show) return null;
+export function ReadOnlyNote({ show, live, twoFactor }: { show: boolean; live: boolean; twoFactor?: boolean }) {
+  // When the role is enough and only two-factor sign-in is missing, the banner on top of the page says so.
+  if (!show || twoFactor) return null;
   return (
     <p className="info warn small">
       You can look but not change things here. {live ? "Changes in live mode need the admin or owner role." : "Changes need the developer role or higher."}

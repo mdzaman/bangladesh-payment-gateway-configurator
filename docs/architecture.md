@@ -108,6 +108,7 @@ put PgBouncer in front and set `BDPAY_CLOUD_DB_PGBOUNCER=true`.
 | Table | Holds |
 |---|---|
 | `users`, `sessions`, `email_tokens` | accounts, dashboard logins, single-use email links |
+| `login_challenges`, `recovery_codes` | two-factor sign-in: a password accepted and a code still owed; single-use recovery codes |
 | `workspaces`, `memberships`, `invitations` | tenants and their teams |
 | `workspace_envs` | the two environments: URL key, encrypted callback secret |
 | `gateway_configs` | per-environment gateway settings; secrets encrypted, hints only in clear |

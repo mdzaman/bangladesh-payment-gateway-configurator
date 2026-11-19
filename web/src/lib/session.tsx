@@ -1,6 +1,6 @@
 // Who is signed in, and what this deployment allows. Loaded once, kept in the
 // react-query cache, and re-read after anything that changes it.
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, type ReactNode } from "react";
 import { ApiError, setCsrfToken, setUnauthenticatedHandler } from "../api/client";
 import * as api from "../api/endpoints";
@@ -29,6 +29,18 @@ async function loadMe(): Promise<Me | null> {
   }
 }
 
+/**
+ * After signing out: tell the page nobody is signed in, then forget what was
+ * loaded for the person who was. The order matters. The mounted page watches
+ * the ["me"] query, and clearing the whole cache first would replace that
+ * query with one the page is not watching, leaving the dashboard on screen.
+ */
+export function forgetSession(queryClient: QueryClient): void {
+  queryClient.setQueryData(["me"], null);
+  queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "me" && query.queryKey[0] !== "platform" });
+  queryClient.getMutationCache().clear();
+}
+
 export function SessionProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const meQuery = useQuery({ queryKey: ["me"], queryFn: loadMe, staleTime: 60_000 });
@@ -50,8 +62,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       await api.auth.logout();
     } finally {
       setCsrfToken("");
-      queryClient.clear();
-      queryClient.setQueryData(["me"], null);
+      forgetSession(queryClient);
     }
   }, [queryClient]);
 

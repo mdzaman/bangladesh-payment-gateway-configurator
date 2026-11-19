@@ -4,8 +4,8 @@ import { del, get, patch, post, put } from "./client";
 import type {
   AdminWorkspace, ApiKey, AuditEntry, Catalog, CheckoutOption, CheckoutSession, ChecklistItem, Delivery, EnvSettings,
   EventPayload, GatewayListing, GatewayState, Invitation, InvitationPreview, Me, Member, Mode, Order, OrderDetail,
-  Overview, Paged, PaymentLink, Platform, RefundResponse, Role, SessionInfo, TestResult, User, WebhookEndpoint,
-  Workspace,
+  Overview, Paged, PaymentLink, Platform, RefundResponse, Role, SessionInfo, TestResult, TwoFactorChallenge,
+  TwoFactorSetup, TwoFactorStatus, User, WebhookEndpoint, Workspace,
 } from "./types";
 
 export interface Env {
@@ -26,7 +26,9 @@ export const auth = {
   me: () => get<Me>("/api/auth/me"),
   signup: (body: { email: string; password: string; name: string; workspace_name?: string; invite_token?: string }) =>
     post<Me>("/api/auth/signup", body),
-  login: (email: string, password: string) => post<Me>("/api/auth/login", { email, password }),
+  /** With two-factor sign-in on, the answer is a challenge for `loginTwoFactor`, not a session. */
+  login: (email: string, password: string) => post<Me | TwoFactorChallenge>("/api/auth/login", { email, password }),
+  loginTwoFactor: (challenge: string, code: string) => post<Me>("/api/auth/login/two-factor", { challenge, code }),
   logout: () => post<{ ok: true }>("/api/auth/logout"),
   verifyEmail: (token: string) => post<{ ok: true; email: string }>("/api/auth/verify-email", { token }),
   resendVerification: () => post<{ ok: true }>("/api/auth/resend-verification"),
@@ -41,12 +43,23 @@ export const auth = {
   acceptInvitation: (token: string) => post<Workspace>("/api/auth/accept-invitation", { token }),
 };
 
+/** `code` is a code from the authenticator app or an unused recovery code. */
+export const twoFactor = {
+  status: () => get<TwoFactorStatus>("/api/auth/two-factor"),
+  setup: (current_password: string) => post<TwoFactorSetup>("/api/auth/two-factor/setup", { current_password }),
+  enable: (code: string) => post<{ recovery_codes: string[] }>("/api/auth/two-factor/enable", { code }),
+  disable: (current_password: string, code: string) =>
+    post<{ ok: true }>("/api/auth/two-factor/disable", { current_password, code }),
+  newRecoveryCodes: (current_password: string, code: string) =>
+    post<{ recovery_codes: string[] }>("/api/auth/two-factor/recovery-codes", { current_password, code }),
+};
+
 // --------------------------------------------------------------- workspaces
 export const workspaces = {
   list: () => get<{ data: Workspace[] }>("/api/workspaces"),
   create: (name: string) => post<Workspace>("/api/workspaces", { name }),
   get: (slug: string) => get<Workspace>(ws(slug)),
-  update: (slug: string, body: Partial<Pick<Workspace, "name" | "display_name" | "support_email" | "support_phone" | "locale">>) =>
+  update: (slug: string, body: Partial<Pick<Workspace, "name" | "display_name" | "support_email" | "support_phone" | "locale" | "require_two_factor">>) =>
     patch<Workspace>(ws(slug), body),
   archive: (slug: string) => del<{ ok: true }>(ws(slug)),
   goLive: (slug: string, legal_name: string) => post<Workspace>(`${ws(slug)}/go-live`, { accept: true, legal_name }),

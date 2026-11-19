@@ -6,7 +6,7 @@ import type { Role } from "../../api/types";
 import { useEnv } from "../../lib/env";
 import { ROLE_HELP } from "../../lib/format";
 import { useSession } from "../../lib/session";
-import { ConfirmButton, ErrorNote, FormError, Loading, PageHead, TextField, Time, useToast } from "../../ui";
+import { ConfirmButton, ErrorNote, FormError, Loading, PageHead, Pill, TextField, Time, useToast } from "../../ui";
 
 const ROLES: Role[] = ["owner", "admin", "developer", "analyst"];
 
@@ -47,7 +47,7 @@ export default function Team() {
       <section className="card flush">
         <div className="scroll">
           <table className="cards">
-            <thead><tr><th>Person</th><th>Role</th><th>Joined</th><th /></tr></thead>
+            <thead><tr><th>Person</th><th>Role</th>{ctx.isAdmin && <th>Two-factor sign-in</th>}<th>Joined</th><th /></tr></thead>
             <tbody>
               {members.map((m) => {
                 const locked = !ctx.isAdmin || (m.role === "owner" && !ctx.isOwner);
@@ -62,6 +62,11 @@ export default function Team() {
                         </select>
                       )}
                     </td>
+                    {ctx.isAdmin && (
+                      <td data-l="Two-factor">
+                        {m.two_factor ? <Pill tone="ok">On</Pill> : <Pill tone={ctx.workspace.require_two_factor ? "warn" : "grey"}>Off</Pill>}
+                      </td>
+                    )}
                     <td data-l="Joined" className="small"><Time value={m.joined_at} /></td>
                     <td className="actions">
                       {m.you ? (

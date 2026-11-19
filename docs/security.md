@@ -55,8 +55,10 @@ the `(workspace_id, mode)` columns on every tenant table are what a policy would
 | Gateway credentials, Nagad keys | AES-256-GCM ciphertext |
 | Callback-signing secrets, webhook signing secrets | AES-256-GCM ciphertext |
 | Cached provider access tokens | AES-256-GCM ciphertext |
+| Two-factor (authenticator app) secrets | AES-256-GCM ciphertext |
 | API keys | SHA-256 only (the key has about 238 bits of entropy) |
-| Session cookies, email-link tokens, invitations | SHA-256 only |
+| Session cookies, sign-in challenges, email-link tokens, invitations | SHA-256 only |
+| Two-factor recovery codes | SHA-256 only (each code has 80 bits of entropy) |
 | Passwords | Argon2id |
 
 * Keys come from `BDPAY_CLOUD_MASTER_KEYS`, a ring `id:key,id:key`. The first encrypts;
@@ -100,10 +102,71 @@ and is refused in production.
   change or reset ends other sessions.
 * Writes need the per-session CSRF token in `X-CSRF-Token`; in production the `Origin`
   header must also match. No CORS headers are sent, so other sites cannot call the API.
-* Login: rate limited per address and per account, account lock after eight failures,
-  identical answer for "no such account" and "wrong password", with equalised timing.
+* Login: rate limited per address and per account, account lock for 15 minutes after
+  eight failures, identical answer for "no such account" and "wrong password", with
+  equalised timing. The failures are added up by the database in one statement, so
+  guesses sent in parallel are each counted, and a password that turns out to be right
+  is refused if the account locked while it was being checked.
+* Where a signed-in page asks for the password again (changing it, and every change to
+  two-factor sign-in), a wrong one counts towards the same lock, and a locked account is
+  refused there too. A session that fell into the wrong hands is not a place to guess
+  the password without limit.
 * Roles: owner, admin, developer, analyst. Changing things in live mode needs admin;
   live mode itself can only be activated by an owner with a confirmed email.
+
+## Two-factor sign-in
+
+Each person can add a second factor to their account: a time-based code from an
+authenticator app (TOTP, RFC 6238, with the parameters every app supports: SHA-1, six
+digits, 30 seconds). Owners can require it of anyone who changes things in live mode
+(Settings, "Sign-in security").
+
+* **No session without the code.** With the factor on, a correct password is answered
+  with a single-purpose challenge, valid for 10 minutes, and no cookie. A session is
+  created only when a valid code comes back with that challenge. Only the SHA-256 of
+  the challenge is stored.
+* **Each code works once.** The last accepted time step is kept per account and nothing
+  at or before it is accepted again. One step either side of the server's clock is
+  accepted, so a phone up to 30 seconds out still works. Attempts are serialised with a
+  row lock: several requests carrying the same code get one session between them.
+* **Wrong codes count as failed sign-ins.** They share the counter and the lock-out
+  with wrong passwords (eight failures, then 15 minutes), and a correct password does
+  not reset it. The code step is also rate limited per challenge and per address. That
+  leaves someone who already has the password about 770 guesses a day at 3 in a
+  million each, roughly a 1 in 400 chance per day, with the account locked throughout.
+* **Recovery codes.** Ten are issued when the factor is switched on. Each works once.
+  They are shown once and stored as SHA-256 bound to the account. Using one is written
+  to the audit log and the account holder is emailed.
+* **Changing it takes both factors.** Starting set-up needs the password. Switching the
+  factor off, or issuing new recovery codes, needs the password and a current code (or
+  a recovery code), so a hijacked session cannot remove it. A wrong password or code on
+  these pages counts towards the same lock-out as at sign-in, and a locked account is
+  refused there as well. They are also rate limited per account (ten tries per 15
+  minutes, shared with changing the password). Switching it on or off signs out every
+  other device and emails the account holder.
+* **An unfinished set-up expires.** The first code has to arrive within 15 minutes of
+  starting. After that the set-up has to be started again, which takes the password,
+  and housekeeping deletes the unused secret. Without this, a set-up someone walked
+  away from could be confirmed much later with a code alone.
+* **A password reset does not get past it.** The emailed link sets a password and
+  creates no session; the next sign-in still asks for the code. For an account with the
+  factor on, a reset also leaves the failed-attempt counter alone, so controlling the
+  mailbox does not buy more guesses.
+* **The secret** is encrypted at rest like gateway credentials, bound to the account
+  (`totp:<user>`), and shown only during set-up. The QR code is drawn in the browser:
+  the secret is never sent to a QR service or any other third party.
+* **The workspace rule.** When an owner requires two-factor sign-in, a member without
+  it can look at live mode but cannot change it: gateways, API keys, webhooks, payment
+  links, orders and refunds, and the live environment's settings. Only an owner whose
+  own account has a second factor can switch the rule on or off, so an owner signed in
+  with a password alone cannot take it away. The rule does not cover team changes, the
+  workspace's own details or archiving. And it cannot protect an account that has no
+  second factor yet from someone who knows its password: the password is all it takes
+  to set one up, though the account holder is emailed when that happens. What the rule
+  ensures is that everyone who changes live things has one.
+* **Locked out** (phone and recovery codes both gone): the operator runs
+  `bdpay-cloud disable-two-factor --email <address>` after checking who is asking. That
+  is written to the audit log and the account holder is emailed.
 
 ## Abuse limits
 
@@ -132,12 +195,11 @@ The workspace audit log records who changed what, with field names but never val
 
 Know these before you run it for other businesses:
 
-* **Two-factor authentication** for dashboard sign-in is not implemented. Sign-in is
-  protected by Argon2id, rate limits and lock-out only. Everything the dashboard does
-  goes through `/api/`, which no customer and no provider ever calls, so a deployment
-  for a single company can put `/api/` behind its identity-aware proxy or office
-  network without affecting payments. A public multi-tenant deployment cannot, and
-  should add a second factor before it holds live credentials for third parties.
+* **Two-factor sign-in is each person's choice**, or each workspace's for changes in
+  live mode. There is no setting that forces it on every account of a deployment.
+* **Passkeys and security keys** (WebAuthn), codes by SMS or email, and "remember this
+  device" are not implemented. The second factor is an authenticator app or a recovery
+  code, and it is asked for at every sign-in.
 * **Database row-level security** is not used (see Tenant isolation).
 * **Single sign-on** (SAML, OIDC) and **subscription billing** are not part of the service.
 
@@ -149,3 +211,8 @@ Know these before you run it for other businesses:
 * Give outbound traffic a fixed IPv4 if merchants use Nagad or Upay, and publish it in `BDPAY_CLOUD_EGRESS_IPS`.
 * Patch the base image and dependencies; `uv.lock` and `package-lock.json` pin exact versions.
 * Decide who may sign up and go live (`ALLOW_SIGNUP`, `LIVE_MODE=approval`).
+* Have every platform admin turn on two-factor sign-in: an admin can suspend any
+  workspace and approve live mode, and configuration cannot force it for them.
+* Optional, for a deployment used by one company: put `/api/` behind your
+  identity-aware proxy or office network. Everything the dashboard does goes through
+  `/api/`, which no customer and no provider ever calls, so payments are not affected.

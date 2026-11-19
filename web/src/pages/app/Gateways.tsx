@@ -50,7 +50,7 @@ export default function Gateways() {
         Connect your own merchant accounts. Money moves from your customer, through the provider, straight into your
         account; this service only starts and verifies the payment.
       </PageHead>
-      <ReadOnlyNote show={!ctx.canWrite} live={ctx.mode === "live"} />
+      <ReadOnlyNote show={!ctx.canWrite} live={ctx.mode === "live"} twoFactor={ctx.needsTwoFactor} />
 
       <section className="card">
         <h2>1. Choose gateways</h2>

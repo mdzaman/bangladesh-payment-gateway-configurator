@@ -65,7 +65,8 @@ class Dash:
         self.email = ""
 
     def _remember(self, r):
-        if r.status_code == 200:
+        # A sign-in that still owes its second factor answers 200 without a session.
+        if r.status_code == 200 and "csrf_token" in r.json():
             self.me = r.json()
             self.csrf = self.me["csrf_token"]
         return r
@@ -138,6 +139,31 @@ class Dash:
 
 def bearer(key: str) -> dict:
     return {"Authorization": f"Bearer {key}"}
+
+
+def run_cli(monkeypatch, capsys, *argv, keys: str | None = None, **env):
+    """Run ``bdpay-cloud <argv>`` in this process against the test database:
+    (exit code, stdout, stderr)."""
+    from bdpay_cloud import cli
+    from bdpay_cloud import settings as settings_module
+
+    from conftest import TEST_DB, TEST_KEYS
+
+    settings_module.get_settings.cache_clear()
+    for k, v in {
+        "ENV": "test",
+        "DATABASE_URL": TEST_DB,
+        "MASTER_KEYS": keys or TEST_KEYS,
+        "PUBLIC_URL": "https://pay.test",
+        "LOG_FORMAT": "text",
+        **env,
+    }.items():
+        monkeypatch.setenv(f"BDPAY_CLOUD_{k}", v)
+    monkeypatch.chdir("/")  # no stray .env file
+    code = cli.main(list(argv))
+    settings_module.get_settings.cache_clear()
+    out = capsys.readouterr()
+    return code, out.out, out.err
 
 
 def last_email(rt: Runtime, to: str) -> dict | None:

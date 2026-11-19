@@ -80,7 +80,8 @@ export async function request<T>(method: string, path: string, body?: unknown, q
       code?: string; message?: string; errors?: FieldError[]; request_id?: string;
     };
     const message = d.message ?? (typeof detail === "string" ? detail : `Request failed (${response.status})`);
-    if (response.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/me") onUnauthenticated?.();
+    // A wrong password or code at sign-in is a 401 too, and says nothing about a session.
+    if (response.status === 401 && !path.startsWith("/api/auth/login") && path !== "/api/auth/me") onUnauthenticated?.();
     throw new ApiError(response.status, d.code ?? "ERROR", message, d.errors ?? [], d.request_id);
   }
   return data as T;

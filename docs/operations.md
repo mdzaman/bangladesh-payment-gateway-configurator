@@ -57,6 +57,18 @@ merchant fixes their server, "Send again" on a delivery re-queues it.
 minutes after starting, then at growing intervals, for 24 hours). "Ask the provider
 again" on the order does it at once.
 
+**Someone cannot sign in: they lost their phone and their recovery codes.** Check who
+is asking by a channel you trust, then switch two-factor sign-in off for that account.
+They sign in with their password and can set it up again. Every device of theirs is
+signed out, the change is written to the audit log, and they are emailed.
+
+```bash
+bdpay-cloud disable-two-factor --email person@example.com
+```
+
+A recovery code is the way in that needs no operator: each account gets ten when it
+switches two-factor sign-in on.
+
 ## Rotating the master key
 
 ```bash
@@ -72,7 +84,9 @@ untouched, so one damaged row cannot block a rotation. Do not remove old keys wh
 reports unreadable values.
 
 If the keys are lost, stored gateway credentials and webhook secrets cannot be
-recovered: every workspace has to enter its credentials again.
+recovered: every workspace has to enter its credentials again. Codes from authenticator
+apps can no longer be checked either: people with two-factor sign-in use a recovery
+code and set it up again, or you switch it off for them with `disable-two-factor`.
 
 ## Suspending a workspace
 
@@ -90,6 +104,7 @@ bdpay-cloud doctor
 bdpay-cloud gen-key [--id]
 bdpay-cloud rotate-keys
 bdpay-cloud create-user --email --name [--workspace] [--platform-admin] [--password-stdin]
+bdpay-cloud disable-two-factor --email
 bdpay-cloud seed-demo --workspace <slug>       development only
 bdpay-cloud make-migration -m <message>       development only
 bdpay-cloud openapi

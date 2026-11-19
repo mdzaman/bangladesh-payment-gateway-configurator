@@ -387,3 +387,13 @@ svg.chart .hit { fill: transparent; cursor: default; }
 .meters .fig { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 @media (max-width: 520px) { .meters { grid-template-columns: minmax(0, 1fr) max-content; } .meters .track { grid-column: 1 / -1; order: 3; } }
 @media (prefers-reduced-motion: reduce) { .stale { transition: none; } }
+
+/* ------------------------------------------------------------ two-factor */
+input.otp { font-family: var(--font-mono); font-size: 18px; letter-spacing: 0.1em; }
+/* The QR code stays black on white in both themes: that is what cameras read. */
+.qr { width: 196px; height: 196px; flex: none; display: block; background: #fff; border: 1px solid var(--line); border-radius: 10px; }
+.twofa { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 600px) { .twofa { grid-template-columns: minmax(0, 1fr); } }
+.codes { list-style: none; margin: 10px 0; padding: 0; display: grid; grid-template-columns: repeat(2, max-content); gap: 2px 32px; }
+.secret-once .codes code { margin: 0; font-size: 15px; }
+@media (max-width: 420px) { .codes { grid-template-columns: minmax(0, 1fr); } }
