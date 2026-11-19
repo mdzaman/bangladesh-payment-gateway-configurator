@@ -9,8 +9,14 @@ switched on::
 
 A challenge opens nothing by itself. The second step takes a code from an
 authenticator app (TOTP) or one of the single-use recovery codes. Wrong
-passwords and wrong codes feed the same counter, so the account locks after
-``MAX_FAILED_LOGINS`` of either.
+passwords and wrong codes feed the same counter, wherever they are typed, so
+the account locks after ``MAX_FAILED_LOGINS`` of either.
+
+Everything that changes how an account signs in (a sign-in itself, a new
+password, two-factor on or off) first locks the account's row, then touches
+its sessions, then its sign-in challenges. One order for all of them, so two
+such requests for one account wait for each other instead of deadlocking, and
+never both spend the same code.
 """
 
 from __future__ import annotations
@@ -134,10 +140,66 @@ def logout(db: Session, token: str) -> None:
 
 
 def revoke_sessions(db: Session, user_id: str, keep: str | None = None) -> None:
+    # The account before its sessions, whether or not the caller holds it already.
+    # Only the lock: callers have changes to the account pending that a re-read would undo.
+    db.execute(select(User.id).where(User.id == user_id).with_for_update(key_share=True))
     q = update(UserSession).where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
     if keep:
         q = q.where(UserSession.id != keep)
     db.execute(q.values(revoked_at=utcnow()))
+
+
+# ------------------------------------------ the account row, failed attempts
+def _lock_account(db: Session, user_id: str) -> User | None:
+    """The account row, locked for this transaction and read afresh.
+
+    FOR NO KEY UPDATE, not FOR UPDATE: it shuts out every other change to the
+    same account, which is the point, but not rows that merely refer to it. A
+    new session or a new emailed link only needs the account to go on existing.
+    FOR UPDATE would make those wait too, and a password reset would then
+    deadlock with a second "forgot password" for the same account."""
+    return db.get(User, user_id, with_for_update={"key_share": True}, populate_existing=True)
+
+
+def _refuse_if_locked(user: User, now: datetime) -> None:
+    if user.locked_until is not None and user.locked_until > now:
+        raise AuthError("Too many failed attempts. Try again in a few minutes.", 429, "RATE_LIMITED")
+
+
+def _count_failure(db: Session, user: User, now: datetime) -> None:
+    """One more wrong password or wrong code. Added up in the database, in one
+    statement, so guesses sent in parallel are each counted; the account locks
+    at the limit. Committed, so the count outlives the request that fails."""
+    reached = User.failed_logins + 1 >= MAX_FAILED_LOGINS
+    db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(
+            locked_until=case((reached, now + timedelta(minutes=LOCK_MINUTES)), else_=User.locked_until),
+            failed_logins=case((reached, 0), else_=User.failed_logins + 1),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+
+
+def _locked_user(db: Session, user_id: str) -> tuple[User, datetime]:
+    """A signed-in person's own account, locked, for a change that asks for the
+    password or a code again. A locked-out account is turned away here too."""
+    user = _lock_account(db, user_id)
+    if user is None:
+        raise AuthError("Sign in to continue", 401, "UNAUTHENTICATED")
+    now = utcnow()
+    _refuse_if_locked(user, now)
+    return user, now
+
+
+def _need_password(db: Session, user: User, password: str, now: datetime) -> None:
+    """The password, asked for again from someone already signed in. A wrong one
+    counts as it does at sign-in: an open session is not a place to guess it."""
+    if not passwords.verify_password(user.password_hash, password):
+        _count_failure(db, user, now)
+        raise AuthError("Your current password is not correct", 400)
 
 
 # -------------------------------------------------------------- email tokens
@@ -187,6 +249,8 @@ def request_password_reset(db: Session, settings: Settings, email: str) -> None:
 
 def reset_password(db: Session, token: str, new_password: str) -> User:
     user = _consume(db, token, "reset_password")
+    # The account row before anything of the account's changes, and its state as it is under that lock.
+    user = _lock_account(db, user.id) if user is not None else None
     if user is None:
         raise AuthError("This reset link is invalid or has expired", 400)
     problem = passwords.password_problem(new_password, email=user.email, name=user.name)
@@ -206,13 +270,13 @@ def reset_password(db: Session, token: str, new_password: str) -> User:
     return user
 
 
-def change_password(db: Session, user: User, current: str, new: str, keep_session: str | None) -> None:
-    if not passwords.verify_password(user.password_hash, current):
-        raise AuthError("Your current password is not correct", 400)
+def change_password(db: Session, user_id: str, current: str, new: str, keep_session: str | None) -> None:
+    user, now = _locked_user(db, user_id)
+    _need_password(db, user, current, now)
     problem = passwords.password_problem(new, email=user.email, name=user.name)
     if problem:
         raise AuthError(problem)
-    user.password_hash, user.updated_at = passwords.hash_password(new), utcnow()
+    user.password_hash, user.updated_at = passwords.hash_password(new), now
     revoke_sessions(db, user.id, keep=keep_session)
 
 
@@ -271,28 +335,6 @@ def signup(
     return SignupResult(user, workspace, session, token)
 
 
-def _refuse_if_locked(user: User, now: datetime) -> None:
-    if user.locked_until is not None and user.locked_until > now:
-        raise AuthError("Too many failed attempts. Try again in a few minutes.", 429, "RATE_LIMITED")
-
-
-def _count_failure(db: Session, user: User, now: datetime) -> None:
-    """One more wrong password or wrong code. Added up in the database, in one
-    statement, so guesses sent in parallel are each counted; the account locks
-    at the limit. Committed, so the count outlives the request that fails."""
-    reached = User.failed_logins + 1 >= MAX_FAILED_LOGINS
-    db.execute(
-        update(User)
-        .where(User.id == user.id)
-        .values(
-            locked_until=case((reached, now + timedelta(minutes=LOCK_MINUTES)), else_=User.locked_until),
-            failed_logins=case((reached, 0), else_=User.failed_logins + 1),
-        )
-        .execution_options(synchronize_session=False)
-    )
-    db.commit()
-
-
 def login(
     db: Session, settings: Settings, *, email: str, password: str, ip: str | None = None, user_agent: str | None = None
 ) -> LoginResult:
@@ -302,9 +344,22 @@ def login(
         raise BAD_LOGIN
     now = utcnow()
     _refuse_if_locked(user, now)
-    if not passwords.verify_password(user.password_hash, password):
+    checked = user.password_hash
+    if not passwords.verify_password(checked, password):
         _count_failure(db, user, now)
         raise BAD_LOGIN
+    # Checking a password is slow on purpose, and the row was not locked for it.
+    # Take the account now and look again: other guesses sent at the same moment
+    # may have locked it, or the password may have been changed, in the meantime.
+    user = _lock_account(db, user.id)
+    now = utcnow()
+    if user is None:
+        raise BAD_LOGIN
+    # A different hash is a new password, or the same one re-hashed by a sign-in
+    # that finished a moment earlier. Only the first is a reason to refuse.
+    if user.password_hash != checked and not passwords.verify_password(user.password_hash, password):
+        raise BAD_LOGIN
+    _refuse_if_locked(user, now)
     if user.disabled_at is not None:
         raise AuthError("This account is disabled", 403, "FORBIDDEN")
     if passwords.needs_rehash(user.password_hash):
@@ -366,7 +421,7 @@ def complete_login(
     user_id = db.scalar(select(LoginChallenge.user_id).where(LoginChallenge.id == challenge_id))
     # The account row is locked before anything is checked, so two requests can
     # never both spend the same challenge, the same code or the same recovery code.
-    user = db.get(User, user_id, with_for_update=True, populate_existing=True) if user_id else None
+    user = _lock_account(db, user_id) if user_id else None
     row = db.get(LoginChallenge, challenge_id) if user else None
     now = utcnow()
     if (
@@ -481,22 +536,6 @@ def setup_pending(user: User, now: datetime | None = None) -> bool:
         and user.totp_started_at is not None
         and (now or utcnow()) - user.totp_started_at <= timedelta(minutes=TOTP_SETUP_MINUTES)
     )
-
-
-def _locked_user(db: Session, user_id: str) -> tuple[User, datetime]:
-    """The account row, locked for this transaction and freshly read."""
-    user = db.get(User, user_id, with_for_update=True, populate_existing=True)
-    if user is None:
-        raise AuthError("Sign in to continue", 401, "UNAUTHENTICATED")
-    now = utcnow()
-    _refuse_if_locked(user, now)
-    return user, now
-
-
-def _need_password(db: Session, user: User, password: str, now: datetime) -> None:
-    if not passwords.verify_password(user.password_hash, password):
-        _count_failure(db, user, now)
-        raise AuthError("Your current password is not correct", 400)
 
 
 def begin_two_factor(db: Session, vault: Vault, settings: Settings, user_id: str, password: str) -> TwoFactorSetup:

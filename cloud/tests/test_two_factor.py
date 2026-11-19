@@ -2,15 +2,20 @@
 
 import base64
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from argon2 import PasswordHasher
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import DBAPIError
 
 from bdpay_cloud import migrate
 from bdpay_cloud.crypto import Vault, VaultError, aad_totp
-from bdpay_cloud.security import totp
+from bdpay_cloud.db import session_scope
+from bdpay_cloud.security import passwords, totp
+from bdpay_cloud.services import auth
 from bdpay_cloud.workers import housekeeping
 
 from conftest import TEST_KEYS
@@ -387,6 +392,125 @@ def test_the_second_step_shares_the_sign_in_rate_limit(dash, new_client, clock):
     assert statuses[:9] == [400] * 9 and statuses[9:] == [429, 429]
     assert "Too many requests" in message(visitor.second_step(code="12345"))
     assert Dash(new_client()).login(dash.email).status_code == 429  # one budget for both steps
+
+
+# ------------------------------------------- the same rules while signed in
+CHANGE = "/api/auth/change-password"
+
+
+def test_a_wrong_password_on_the_change_password_page_counts_towards_the_lock(dash, new_client, app, rt):
+    """No two-factor needed for this one: an open session is not a place to guess the password."""
+    new = "another long password 1"
+    for attempt in range(8):
+        app.state.limiter.reset()
+        assert user_row(rt, dash.email).failed_logins == attempt
+        r = dash.post(CHANGE, {"current_password": "definitely wrong", "new_password": new})
+        assert r.status_code == 400 and message(r) == "Your current password is not correct", attempt
+    row = user_row(rt, dash.email)
+    assert row.locked_until is not None and row.failed_logins == 0
+    app.state.limiter.reset()
+    # Locked: the right password is turned away here as it is at sign-in, and nothing changed.
+    r = dash.post(CHANGE, {"current_password": PASSWORD, "new_password": new})
+    assert r.status_code == 429 and "Too many failed attempts" in message(r)
+    assert Dash(new_client()).login(dash.email).status_code == 429
+    with rt.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE users SET locked_until = now() - interval '1 second' WHERE email = :e"), {"e": dash.email}
+        )
+    assert Dash(new_client()).login(dash.email, new).status_code == 401
+    assert dash.post(CHANGE, {"current_password": PASSWORD, "new_password": new}).status_code == 200
+    assert Dash(new_client()).login(dash.email, new).status_code == 200
+
+
+def test_pages_that_ask_for_the_password_again_share_a_rate_limit(dash):
+    # A new password that is too short is refused before anything counts as a failure,
+    # so this reaches the rate limit and not the lock-out: 20 tries per 15 minutes.
+    body = {"current_password": PASSWORD, "new_password": "short"}
+    statuses = [dash.post(CHANGE, body).status_code for _ in range(22)]
+    assert statuses[:20] == [400] * 20 and statuses[20:] == [429, 429]
+    assert "Too many requests" in message(dash.post(CHANGE, body))
+    assert dash.post(SETUP, {"current_password": PASSWORD}).status_code == 429  # the two-factor pages draw on it too
+
+
+@pytest.mark.parametrize("meanwhile", ["locked", "password changed", "password re-hashed"])
+def test_a_right_password_is_looked_at_again_once_the_account_is_locked(dash, new_client, rt, monkeypatch, meanwhile):
+    """Checking a password is slow, and the account row is not held for it. Whatever
+    happened to the account during the check is seen before a session is made."""
+    other_hasher = PasswordHasher(time_cost=2, memory_cost=8, parallelism=1)
+    change = {
+        "locked": ("UPDATE users SET locked_until = now() + interval '15 minutes' WHERE email = :e", {}),
+        "password changed": (
+            "UPDATE users SET password_hash = :h WHERE email = :e",
+            {"h": other_hasher.hash("x" * 20)},
+        ),
+        "password re-hashed": (
+            "UPDATE users SET password_hash = :h WHERE email = :e",
+            {"h": other_hasher.hash(PASSWORD)},
+        ),
+    }[meanwhile]
+    real, happened = passwords.verify_password, []
+
+    def check_and_then(password_hash, password):
+        ok = real(password_hash, password)
+        if ok and not happened:  # the other request lands right after this one's check passed
+            happened.append(meanwhile)
+            with rt.engine.begin() as conn:
+                conn.execute(text(change[0]), {"e": dash.email, **change[1]})
+        return ok
+
+    monkeypatch.setattr(passwords, "verify_password", check_and_then)
+    visitor = Dash(new_client())
+    r = visitor.login(dash.email)
+    assert happened == [meanwhile]
+    if meanwhile == "password re-hashed":  # still the right password: only the stored form of it changed
+        assert r.status_code == 200 and visitor.get("/api/auth/me").status_code == 200
+        return
+    assert r.status_code == (429 if meanwhile == "locked" else 401)
+    assert "set-cookie" not in r.headers and visitor.get("/api/auth/me").status_code == 401
+    with rt.engine.connect() as conn:  # and no session row was left behind for it
+        sessions = conn.execute(
+            text("SELECT count(*) FROM sessions WHERE user_id = :u"), {"u": dash.me["user"]["id"]}
+        ).scalar()
+    assert sessions == 1  # the one the fixture signed up with
+
+
+def test_a_reset_and_another_forgot_password_at_the_same_moment_do_not_deadlock(dash, rt):
+    """The account row is locked FOR NO KEY UPDATE. With plain FOR UPDATE these two
+    wait for each other: the reset holds the account and wants its link's row, the
+    new request holds that row and wants to insert a link that refers to the account."""
+    with session_scope(rt.sessions) as db:
+        auth.request_password_reset(db, rt.settings, dash.email)
+    token = token_from(last_email(rt, dash.email))
+    reset_holds_account, forgot_holds_link = threading.Event(), threading.Event()
+    outcome: dict[str, str] = {}
+
+    def use_the_link():
+        try:
+            with session_scope(rt.sessions) as db:
+                auth.reset_password(db, token, "a brand new long password")  # what the reset page calls
+                reset_holds_account.set()
+                forgot_holds_link.wait(5)
+                time.sleep(0.4)  # long enough for the other request to reach its commit
+            outcome["reset"] = "committed"
+        except DBAPIError as e:
+            outcome["reset"] = type(e.orig).__name__
+
+    def ask_for_another():
+        try:
+            reset_holds_account.wait(5)
+            with session_scope(rt.sessions) as db:
+                auth.request_password_reset(db, rt.settings, dash.email)  # what the forgot-password page calls
+                forgot_holds_link.set()
+            outcome["forgot"] = "committed"
+        except DBAPIError as e:
+            outcome["forgot"] = type(e.orig).__name__
+
+    threads = [threading.Thread(target=use_the_link), threading.Thread(target=ask_for_another)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    assert outcome == {"reset": "committed", "forgot": "committed"}
 
 
 # ------------------------------------------------------------ the challenge

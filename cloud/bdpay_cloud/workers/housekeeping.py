@@ -27,6 +27,17 @@ def heartbeat(rt: Runtime, name: str = "worker") -> None:
 def run(rt: Runtime) -> dict[str, int]:
     done = {"sessions_expired": checkout.expire_due(rt)}
     with rt.engine.begin() as conn:
+        # A two-factor set-up that was started and never confirmed: do not keep its
+        # secret around. In a short transaction of its own, because it locks account
+        # rows: held through the deletes below, they would keep those people from
+        # signing in meanwhile, and an account is always locked before its sessions.
+        done["two_factor_setups"] = conn.execute(
+            text(
+                "UPDATE users SET totp_secret_enc = NULL, totp_started_at = NULL "
+                "WHERE totp_enabled_at IS NULL AND totp_started_at < now() - interval '1 day'"
+            )
+        ).rowcount
+    with rt.engine.begin() as conn:
         done["tokens"] = conn.execute(text("DELETE FROM provider_tokens WHERE expires_at < now()")).rowcount
         done["idempotency"] = conn.execute(
             text("DELETE FROM idempotency_keys WHERE created_at < now() - interval '48 hours'")
@@ -42,13 +53,6 @@ def run(rt: Runtime) -> dict[str, int]:
         ).rowcount
         done["login_challenges"] = conn.execute(
             text("DELETE FROM login_challenges WHERE expires_at < now() - interval '1 day'")
-        ).rowcount
-        # A two-factor set-up that was started and never confirmed: do not keep its secret around.
-        done["two_factor_setups"] = conn.execute(
-            text(
-                "UPDATE users SET totp_secret_enc = NULL, totp_started_at = NULL "
-                "WHERE totp_enabled_at IS NULL AND totp_started_at < now() - interval '1 day'"
-            )
         ).rowcount
         done["emails"] = conn.execute(
             text("DELETE FROM outbound_emails WHERE status <> 'pending' AND created_at < now() - interval '30 days'")

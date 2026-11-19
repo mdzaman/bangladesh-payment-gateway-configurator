@@ -283,23 +283,25 @@ def reset_password(body: ResetIn, request: Request, rt: Runtime = Depends(get_rt
     return {"ok": True}
 
 
+def _reauth_limit(request: Request, user: UserCtx) -> None:
+    # Changing the password and every two-factor change take the password or a
+    # code again from someone already signed in. The account lock-out is the real
+    # limit on guessing them; this keeps a script from even getting there fast.
+    rate_limit(request, "reauth", user.user.id, 20, 900)
+
+
 @router.post("/auth/change-password")
-def change_password(body: ChangePasswordIn, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)):
+def change_password(
+    body: ChangePasswordIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    _reauth_limit(request, user)
     with session_scope(rt.sessions) as db:
-        auth.change_password(
-            db, db.get(User, user.user.id), body.current_password, body.new_password, keep_session=user.session_id
-        )
+        auth.change_password(db, user.user.id, body.current_password, body.new_password, keep_session=user.session_id)
         audit.record(db, user.actor, "user.password_changed")
     return {"ok": True}
 
 
 # ---------------------------------------------------------------- two-factor
-def _two_factor_limit(request: Request, user: UserCtx) -> None:
-    # These take a password or a code from someone already signed in. The account
-    # lock-out is the real limit on guessing; this keeps a script from even getting there fast.
-    rate_limit(request, "two_factor", user.user.id, 20, 900)
-
-
 @router.get("/auth/two-factor")
 def two_factor_status(user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)):
     with session_scope(rt.sessions) as db:
@@ -311,7 +313,7 @@ def two_factor_setup(
     body: TwoFactorSetupIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
 ):
     """Start a set-up. The secret is in this response and in no other."""
-    _two_factor_limit(request, user)
+    _reauth_limit(request, user)
     with session_scope(rt.sessions) as db:
         setup = auth.begin_two_factor(db, rt.vault, rt.settings, user.user.id, body.current_password)
     return {
@@ -330,7 +332,7 @@ def two_factor_confirm(
     body: TwoFactorConfirmIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
 ):
     """Switch it on with the first code. The recovery codes are in this response and in no other."""
-    _two_factor_limit(request, user)
+    _reauth_limit(request, user)
     with session_scope(rt.sessions) as db:
         codes = auth.confirm_two_factor(db, rt.vault, user.user.id, body.code, keep_session=user.session_id)
         audit.record(db, user.actor, "user.two_factor_enabled")
@@ -341,7 +343,7 @@ def two_factor_confirm(
 def two_factor_disable(
     body: TwoFactorChangeIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
 ):
-    _two_factor_limit(request, user)
+    _reauth_limit(request, user)
     with session_scope(rt.sessions) as db:
         auth.disable_two_factor(
             db,
@@ -361,7 +363,7 @@ def two_factor_recovery_codes(
     body: TwoFactorChangeIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
 ):
     """Replace the recovery codes. The new ones are in this response and in no other."""
-    _two_factor_limit(request, user)
+    _reauth_limit(request, user)
     with session_scope(rt.sessions) as db:
         codes = auth.regenerate_recovery_codes(
             db,
