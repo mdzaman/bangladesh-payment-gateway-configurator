@@ -116,8 +116,17 @@ class WsCtx:
             raise ApiError(403, "FORBIDDEN", f"Your role ({self.role}) cannot do this. It needs {minimum} or higher.")
 
     def need_write(self) -> None:
-        """Changing things: developers may in sandbox, live needs an admin."""
-        self.need("admin" if self.env is not None and self.env.scope.mode == "live" else "developer")
+        """Changing things: developers may in sandbox, live needs an admin, and
+        a second sign-in factor as well if the workspace asks for one."""
+        live = self.env is not None and self.env.scope.mode == "live"
+        self.need("admin" if live else "developer")
+        wanted = (self.workspace.settings or {}).get("require_two_factor")
+        if live and wanted and self.user.user.totp_enabled_at is None:
+            raise ApiError(
+                403,
+                "TWO_FACTOR_REQUIRED",
+                "This workspace requires two-factor sign-in for changes in live mode. Turn it on under Your account.",
+            )
 
 
 def workspace_ctx(slug: str, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)) -> WsCtx:

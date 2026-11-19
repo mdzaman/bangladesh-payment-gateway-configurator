@@ -99,6 +99,47 @@ def send_invitation(
     enqueue(db, to, f"{inviter} invited you to {workspace} on {settings.brand_name}", t, h)
 
 
+SECURITY_NOTICES = {
+    "two_factor_enabled": (
+        "Two-factor sign-in was turned on",
+        "Signing in to your account now takes a code from your authenticator app as well as your password.",
+    ),
+    "two_factor_disabled": (
+        "Two-factor sign-in was turned off",
+        "Your account is now protected by its password alone.",
+    ),
+    "two_factor_reset": (
+        "Two-factor sign-in was turned off by the operator",
+        "The operator of this service switched it off for your account. Sign in with your password and set it "
+        "up again.",
+    ),
+    "recovery_code_used": (
+        "A recovery code was used to sign in",
+        "Each recovery code works once. Create new ones on your account page if you are running low.",
+    ),
+    "recovery_codes_regenerated": (
+        "New recovery codes were created",
+        "The recovery codes you had before no longer work.",
+    ),
+}
+
+
+def send_security_notice(db: Session, settings: Settings, to: str, event: str) -> None:
+    """Tell the account holder that their sign-in protection changed, in case it was not them."""
+    heading, what = SECURITY_NOTICES[event]
+    t, h = compose(
+        settings,
+        heading,
+        [
+            what,
+            "If this was you, there is nothing to do. If it was not, change your password at once and sign out "
+            "the other devices on your account page.",
+        ],
+        ("Open your account", f"{settings.public_url}/account"),
+    )
+    enqueue(db, to, f"{settings.brand_name} security notice: {heading[0].lower()}{heading[1:]}", t, h)
+
+
 def deliver(settings: Settings, to: str, subject: str, body_text: str, body_html: str | None) -> None:
     if settings.mail_backend == "console":
         log.info("EMAIL to=%s subject=%s\n%s", to, subject, body_text)

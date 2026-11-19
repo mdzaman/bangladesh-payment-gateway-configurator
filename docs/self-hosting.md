@@ -51,6 +51,8 @@ docker compose exec api bdpay-cloud create-user --email you@example.com --name "
 ```
 
 A platform admin sees every workspace at `/admin` and can approve live mode or suspend.
+Turn on two-factor sign-in for that account straight away (Account, "Two-factor
+sign-in").
 
 ## 2. Kubernetes
 

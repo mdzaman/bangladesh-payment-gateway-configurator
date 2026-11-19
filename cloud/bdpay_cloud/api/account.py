@@ -12,6 +12,7 @@ from ..context import Actor
 from ..db import session_scope, utcnow
 from ..engine.orders import iso
 from ..engine.runtime import Runtime
+from ..ids import sha256_hex
 from ..models import Invitation, Membership, User, UserSession, Workspace
 from ..services import audit, auth, mailer, workspaces
 from ..settings import Settings
@@ -19,15 +20,19 @@ from .deps import UserCtx, WsCtx, client_ip, current_user, get_rt, rate_limit, w
 from .errors import ApiError
 from .schemas import (
     ChangePasswordIn,
+    CodeIn,
     EmailIn,
     GoLiveIn,
     InviteIn,
     LoginIn,
+    PasswordCodeIn,
+    PasswordIn,
     ProfileIn,
     ResetIn,
     RoleIn,
     SignupIn,
     TokenIn,
+    TwoFactorLoginIn,
     WorkspaceIn,
     WorkspacePatch,
 )
@@ -41,6 +46,9 @@ ATTESTATION = (
     "holds or moves the money; (3) this workspace will not be used to collect payments on behalf of other people "
     "or businesses, or into personal wallets; and (4) I am authorised to accept this for the business."
 )
+# Set-up, switching off and new recovery codes, per account per 15 minutes. Each
+# of them can be used to guess a code, so together they get few tries.
+TWO_FACTOR_TRIES = 10
 
 
 # -------------------------------------------------------------------- shapes
@@ -50,6 +58,7 @@ def user_json(u: User) -> dict[str, Any]:
         "email": u.email,
         "name": u.name,
         "email_verified": u.email_verified_at is not None,
+        "two_factor_enabled": u.totp_enabled_at is not None,
         "is_platform_admin": u.is_platform_admin,
         "created_at": iso(u.created_at),
     }
@@ -66,6 +75,7 @@ def workspace_json(ws: Workspace, role: str | None = None) -> dict[str, Any]:
         "support_email": s.get("support_email", ""),
         "support_phone": s.get("support_phone", ""),
         "locale": s.get("locale", ""),
+        "require_two_factor": bool(s.get("require_two_factor")),
         "live_status": ws.live_status,
         "live_activated_at": iso(ws.live_activated_at),
         "suspended": ws.suspended_at is not None,
@@ -163,11 +173,43 @@ def login(body: LoginIn, request: Request, response: Response, rt: Runtime = Dep
     rate_limit(request, "login_ip", ip, rt.settings.login_rate_per_15min * 3, 900)
     rate_limit(request, "login_email", email, rt.settings.login_rate_per_15min, 900)
     with session_scope(rt.sessions) as db:
-        user, session, token = auth.login(
+        res = auth.login(
             db, rt.settings, email=email, password=body.password, ip=ip, user_agent=request.headers.get("user-agent")
         )
-        payload = me_payload(db, rt, user, session.csrf_token)
-    _set_cookie(response, rt.settings, token)
+        if res.session is None:
+            # Two-factor sign-in: no cookie and no session yet, only the right to try a code.
+            return {"two_factor_required": True, "challenge": res.challenge, "expires_in": auth.CHALLENGE_MINUTES * 60}
+        payload = me_payload(db, rt, res.user, res.session.csrf_token)
+    _set_cookie(response, rt.settings, res.token)
+    return payload
+
+
+@router.post("/auth/login/two-factor")
+def login_two_factor(body: TwoFactorLoginIn, request: Request, response: Response, rt: Runtime = Depends(get_rt)):
+    """Second step of sign-in: a code from the authenticator app, or a recovery code."""
+    ip = client_ip(request)
+    rate_limit(request, "login_ip", ip, rt.settings.login_rate_per_15min * 3, 900)
+    rate_limit(request, "login_challenge", sha256_hex(body.challenge), rt.settings.login_rate_per_15min, 900)
+    with session_scope(rt.sessions) as db:
+        res, factor = auth.complete_login(
+            db,
+            rt.settings,
+            rt.vault,
+            challenge=body.challenge,
+            code=body.code,
+            ip=ip,
+            user_agent=request.headers.get("user-agent"),
+        )
+        if factor == "recovery_code":
+            audit.record(
+                db,
+                Actor("user", res.user.id, res.user.email, ip),
+                "user.recovery_code_used",
+                detail={"left": auth.recovery_codes_left(db, res.user.id)},
+            )
+            mailer.send_security_notice(db, rt.settings, res.user.email, "recovery_code_used")
+        payload = me_payload(db, rt, res.user, res.session.csrf_token)
+    _set_cookie(response, rt.settings, res.token)
     return payload
 
 
@@ -236,6 +278,78 @@ def change_password(body: ChangePasswordIn, user: UserCtx = Depends(current_user
         )
         audit.record(db, user.actor, "user.password_changed")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- two-factor
+def two_factor_json(db, u: User) -> dict[str, Any]:
+    on = u.totp_enabled_at is not None
+    return {
+        "enabled": on,
+        "enabled_at": iso(u.totp_enabled_at),
+        "recovery_codes_left": auth.recovery_codes_left(db, u.id) if on else 0,
+    }
+
+
+def _own_account(db, user: UserCtx, request: Request) -> User:
+    """This person's row, locked, for a change to their two-factor sign-in."""
+    rate_limit(request, "two_factor", user.user.id, TWO_FACTOR_TRIES, 900)
+    return db.get(User, user.user.id, with_for_update=True, populate_existing=True)
+
+
+@router.get("/auth/two-factor")
+def two_factor_status(user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)):
+    with session_scope(rt.sessions) as db:
+        return two_factor_json(db, db.get(User, user.user.id))
+
+
+@router.post("/auth/two-factor/setup")
+def two_factor_setup(
+    body: PasswordIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    """Step one: a new secret for the authenticator app. Nothing changes at sign-in yet."""
+    with session_scope(rt.sessions) as db:
+        secret, uri = auth.begin_two_factor(
+            db, rt.vault, rt.settings, _own_account(db, user, request), body.current_password
+        )
+    return {"secret": secret, "otpauth_uri": uri}
+
+
+@router.post("/auth/two-factor/enable")
+def two_factor_enable(
+    body: CodeIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    """Step two: a code from the app proves it was set up. Answers with the recovery codes, once."""
+    with session_scope(rt.sessions) as db:
+        row = _own_account(db, user, request)
+        codes = auth.confirm_two_factor(db, rt.vault, row, body.code, keep_session=user.session_id)
+        audit.record(db, user.actor, "user.two_factor_enabled")
+        mailer.send_security_notice(db, rt.settings, row.email, "two_factor_enabled")
+    return {"recovery_codes": codes}
+
+
+@router.post("/auth/two-factor/disable")
+def two_factor_disable(
+    body: PasswordCodeIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    with session_scope(rt.sessions) as db:
+        row = _own_account(db, user, request)
+        auth.disable_two_factor(db, rt.vault, row, body.current_password, body.code, keep_session=user.session_id)
+        audit.record(db, user.actor, "user.two_factor_disabled")
+        mailer.send_security_notice(db, rt.settings, row.email, "two_factor_disabled")
+    return {"ok": True}
+
+
+@router.post("/auth/two-factor/recovery-codes")
+def two_factor_recovery_codes(
+    body: PasswordCodeIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    """Replace every recovery code. The earlier ones stop working."""
+    with session_scope(rt.sessions) as db:
+        row = _own_account(db, user, request)
+        codes = auth.regenerate_recovery_codes(db, rt.vault, row, body.current_password, body.code)
+        audit.record(db, user.actor, "user.recovery_codes_regenerated")
+        mailer.send_security_notice(db, rt.settings, row.email, "recovery_codes_regenerated")
+    return {"recovery_codes": codes}
 
 
 @router.get("/auth/sessions")
@@ -331,9 +445,15 @@ def get_workspace(ctx: WsCtx = Depends(workspace_ctx)):
 @router.patch("/workspaces/{slug}")
 def update_workspace(body: WorkspacePatch, ctx: WsCtx = Depends(workspace_ctx), rt: Runtime = Depends(get_rt)):
     ctx.need("admin")
+    changes = body.model_dump(exclude_unset=True)
+    if "require_two_factor" in changes:
+        # Whether the team needs a second factor is for owners to decide, and an
+        # owner cannot ask of others what their own account does not do.
+        ctx.need("owner")
+        if changes["require_two_factor"] and ctx.user.user.totp_enabled_at is None:
+            raise ApiError(400, "VALIDATION", "Turn on two-factor sign-in for your own account first")
     with session_scope(rt.sessions) as db:
         ws = db.get(Workspace, ctx.workspace.id, with_for_update=True)
-        changes = body.model_dump(exclude_unset=True)
         if changes.get("name"):
             ws.name = " ".join(changes.pop("name").split())
         changes.pop("name", None)
@@ -410,6 +530,7 @@ def go_live(body: GoLiveIn, ctx: WsCtx = Depends(workspace_ctx), rt: Runtime = D
 @router.get("/workspaces/{slug}/members")
 def list_members(ctx: WsCtx = Depends(workspace_ctx), rt: Runtime = Depends(get_rt)):
     with session_scope(rt.sessions) as db:
+        is_admin = workspaces.role_at_least(ctx.role, "admin")
         people = [
             {
                 "user_id": u.id,
@@ -418,11 +539,13 @@ def list_members(ctx: WsCtx = Depends(workspace_ctx), rt: Runtime = Depends(get_
                 "role": m.role,
                 "joined_at": iso(m.created_at),
                 "you": u.id == ctx.user.user.id,
+                # Who has a second factor is for the people who run the team to see.
+                "two_factor": (u.totp_enabled_at is not None) if is_admin or u.id == ctx.user.user.id else None,
             }
             for u, m in workspaces.members(db, ctx.workspace.id)
         ]
         pending = []
-        if workspaces.role_at_least(ctx.role, "admin"):
+        if is_admin:
             rows = db.scalars(
                 select(Invitation)
                 .where(

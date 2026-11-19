@@ -135,6 +135,12 @@ export default function Shell() {
               <button type="button" className="bare" onClick={() => refresh()}>I have confirmed</button>
             </p>
           )}
+          {mode === "live" && !liveBlocked && workspace.require_two_factor && !me.user.two_factor_enabled && atLeast(workspace.role, "admin") && (
+            <p className="banner warn" style={{ marginBottom: 16 }}>
+              This workspace requires two-factor sign-in for changes in live mode. You can look, but not change anything here, until
+              you <Link to="/account#two-factor">turn it on for your account</Link>.
+            </p>
+          )}
           <Suspense fallback={<Loading />}>
             {liveBlocked && !WORKSPACE_PAGES.includes(page) ? <GoLive /> : <Outlet />}
           </Suspense>

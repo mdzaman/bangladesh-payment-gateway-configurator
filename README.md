@@ -24,7 +24,7 @@ Not affiliated with any payment provider. MIT licensed.
 | **Reconciliation** | Payments whose redirect or callback was lost are found by asking the provider again. |
 | **Simulator** | A built-in fake provider: take a test payment a minute after signing up, including the awkward cases. |
 | **Self-host generator** | Prints a complete, tested Python service for the gateways you tick, in the browser. Nothing you type is sent anywhere. |
-| **Teams and audit** | Owner, admin, developer and analyst roles; an audit log of who changed what. |
+| **Teams and audit** | Owner, admin, developer and analyst roles; two-factor sign-in with an authenticator app, which owners can require for live changes; an audit log of who changed what. |
 | **Operations** | Health and readiness probes, Prometheus metrics, structured logs with secrets masked, a `doctor` command. |
 
 ## Try it in two minutes
@@ -130,9 +130,9 @@ The payment engine is the bdpay reference implementation, used unchanged
 
 The hosted service adds what sharing a deployment needs: tenant isolation on every
 query, credentials encrypted at rest and never shown again, protection against
-server-side request forgery, rate limits, and exactly-once webhook events.
-[docs/security.md](docs/security.md) explains each, and says what is not included:
-two-factor sign-in, single sign-on and database row-level security.
+server-side request forgery, rate limits, two-factor sign-in, and exactly-once webhook
+events. [docs/security.md](docs/security.md) explains each, and says what is not
+included: single sign-on, passkeys and database row-level security.
 
 ## Repository layout
 
@@ -165,8 +165,8 @@ make lint
 | Suite | What it proves |
 |---|---|
 | `core/tests` (35) | The reference engine, against a fake of every gateway. |
-| `cloud/tests` (234) | The service against a real PostgreSQL (14 and 18). Includes the 35 reference tests re-run on the multi-tenant engine, a byte-for-byte check of `core/` against the build spec, tenant isolation object by object, races (one provider session under concurrent starts, one event under concurrent callbacks), SSRF, key rotation. |
-| `web` (46) | The generator. Twelve generated projects are written to disk and each one's own test-suite is run. |
+| `cloud/tests` (256) | The service against a real PostgreSQL (14 and 18). Includes the 35 reference tests re-run on the multi-tenant engine, a byte-for-byte check of `core/` against the build spec, tenant isolation object by object, races (one provider session under concurrent starts, one event under concurrent callbacks, one session for one sign-in code), SSRF, key rotation, two-factor sign-in. |
+| `web` (56) | The generator: twelve generated projects are written to disk and each one's own test-suite is run. The in-browser QR encoder, against values from the standard. |
 
 ## Compliance
 

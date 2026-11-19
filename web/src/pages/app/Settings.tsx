@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import * as api from "../../api/endpoints";
 import { useEnv } from "../../lib/env";
 import { useSession } from "../../lib/session";
@@ -9,11 +9,19 @@ import GoLive from "./GoLive";
 
 export default function Settings() {
   const ctx = useEnv();
-  const { refresh } = useSession();
+  const { me, refresh } = useSession();
   const navigate = useNavigate();
   const toast = useToast();
   const queryClient = useQueryClient();
   const ws = ctx.workspace;
+  const ownTwoFactor = me?.user.two_factor_enabled ?? false;
+  const requireTwoFactor = useMutation({
+    mutationFn: (on: boolean) => api.workspaces.update(ctx.slug, { require_two_factor: on }),
+    onSuccess: async (data) => {
+      await refresh();
+      toast(data.require_two_factor ? "Live changes now need two-factor sign-in" : "Two-factor sign-in is no longer required");
+    },
+  });
   const [name, setName] = useState(ws.name);
   const [displayName, setDisplayName] = useState(ws.display_name);
   const [supportEmail, setSupportEmail] = useState(ws.support_email);
@@ -80,6 +88,26 @@ export default function Settings() {
           )}
         </section>
       )}
+
+      <section className="card">
+        <h2>Sign-in security</h2>
+        <label className="check">
+          <input type="checkbox" checked={ws.require_two_factor} onChange={(e) => requireTwoFactor.mutate(e.target.checked)}
+            disabled={!ctx.isOwner || requireTwoFactor.isPending || (!ws.require_two_factor && !ownTwoFactor)} />
+          <span>
+            Require two-factor sign-in for changes in live mode
+            <span className="help">
+              Members without it can still look at live mode, but cannot change gateways, API keys or webhooks, or refund payments,
+              until they turn it on for their own account. Sandbox is not affected.
+            </span>
+          </span>
+        </label>
+        {!ctx.isOwner ? <p className="small mute" style={{ marginBottom: 0 }}>Only an owner can change this.</p>
+          : !ownTwoFactor && !ws.require_two_factor && (
+            <p className="small" style={{ marginBottom: 0 }}>Turn it on for <Link to="/account#two-factor">your own account</Link> first.</p>
+          )}
+        <FormError error={requireTwoFactor.error} />
+      </section>
 
       <section className="card" id="live">
         <h2>Live mode</h2>
