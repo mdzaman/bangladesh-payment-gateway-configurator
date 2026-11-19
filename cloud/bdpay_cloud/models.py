@@ -85,6 +85,9 @@ class User(Base):
     # start of set-up; the factor is on only once totp_enabled_at is set.
     totp_secret_enc: Mapped[str | None] = mapped_column(Text)
     totp_enabled_at: Mapped[datetime | None] = mapped_column(TS)
+    # When a set-up that is not confirmed yet was started; it expires a few
+    # minutes later (auth.SETUP_MINUTES). Empty once the factor is on.
+    totp_started_at: Mapped[datetime | None] = mapped_column(TS)
     # The last 30-second step a code was accepted for: nothing at or before it works again.
     totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)

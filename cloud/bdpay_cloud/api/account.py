@@ -46,9 +46,10 @@ ATTESTATION = (
     "holds or moves the money; (3) this workspace will not be used to collect payments on behalf of other people "
     "or businesses, or into personal wallets; and (4) I am authorised to accept this for the business."
 )
-# Set-up, switching off and new recovery codes, per account per 15 minutes. Each
-# of them can be used to guess a code, so together they get few tries.
-TWO_FACTOR_TRIES = 10
+# Changing the password, and setting up, switching off or renewing two-factor
+# sign-in, each ask for the password or a code again. Per account per 15 minutes
+# they share this many tries; wrong ones also count towards the account lock-out.
+REAUTH_TRIES = 10
 
 
 # -------------------------------------------------------------------- shapes
@@ -270,11 +271,19 @@ def reset_password(body: ResetIn, request: Request, rt: Runtime = Depends(get_rt
     return {"ok": True}
 
 
+def _own_account(db, user: UserCtx, request: Request) -> User:
+    """This person's row, locked, for a change that asks for their password or a code again."""
+    rate_limit(request, "reauth", user.user.id, REAUTH_TRIES, 900)
+    return db.get(User, user.user.id, with_for_update=True, populate_existing=True)
+
+
 @router.post("/auth/change-password")
-def change_password(body: ChangePasswordIn, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)):
+def change_password(
+    body: ChangePasswordIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
     with session_scope(rt.sessions) as db:
         auth.change_password(
-            db, db.get(User, user.user.id), body.current_password, body.new_password, keep_session=user.session_id
+            db, _own_account(db, user, request), body.current_password, body.new_password, keep_session=user.session_id
         )
         audit.record(db, user.actor, "user.password_changed")
     return {"ok": True}
@@ -288,12 +297,6 @@ def two_factor_json(db, u: User) -> dict[str, Any]:
         "enabled_at": iso(u.totp_enabled_at),
         "recovery_codes_left": auth.recovery_codes_left(db, u.id) if on else 0,
     }
-
-
-def _own_account(db, user: UserCtx, request: Request) -> User:
-    """This person's row, locked, for a change to their two-factor sign-in."""
-    rate_limit(request, "two_factor", user.user.id, TWO_FACTOR_TRIES, 900)
-    return db.get(User, user.user.id, with_for_update=True, populate_existing=True)
 
 
 @router.get("/auth/two-factor")
@@ -311,7 +314,7 @@ def two_factor_setup(
         secret, uri = auth.begin_two_factor(
             db, rt.vault, rt.settings, _own_account(db, user, request), body.current_password
         )
-    return {"secret": secret, "otpauth_uri": uri}
+    return {"secret": secret, "otpauth_uri": uri, "expires_in": auth.SETUP_MINUTES * 60}
 
 
 @router.post("/auth/two-factor/enable")

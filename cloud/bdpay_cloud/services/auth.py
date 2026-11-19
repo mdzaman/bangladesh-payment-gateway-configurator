@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -27,6 +27,8 @@ MAX_FAILED_LOGINS = 8
 LOCK_MINUTES = 15
 # How long a correct password stays good while the second factor is typed.
 CHALLENGE_MINUTES = 10
+# How long a started two-factor set-up waits for its first code.
+SETUP_MINUTES = 15
 
 
 class AuthError(ServiceError):
@@ -39,12 +41,19 @@ BAD_LOGIN = AuthError("Invalid email or password", 401, "UNAUTHENTICATED")
 BAD_CODE = "That code is not correct. Use the newest code from your app, or a recovery code you have not used."
 
 
-def _locked() -> AuthError:
-    return AuthError("Too many failed attempts. Try again in a few minutes.", 429, "RATE_LIMITED")
+def _refuse_if_locked(user: User, now: datetime) -> None:
+    """Locked after too many wrong passwords or codes: nothing that takes either
+    is even looked at, at sign-in or on a signed-in page, until the lock has passed."""
+    if user.locked_until is not None and user.locked_until > now:
+        raise AuthError("Too many failed attempts. Try again in a few minutes.", 429, "RATE_LIMITED")
 
 
 def _challenge_expired() -> AuthError:
     return AuthError("This sign-in has expired. Enter your password again.", 401, "CHALLENGE_EXPIRED")
+
+
+def _setup_expired(message: str) -> AuthError:
+    return AuthError(message, 400, "SETUP_EXPIRED")
 
 
 def cookie_name(settings: Settings) -> str:
@@ -105,6 +114,10 @@ def logout(db: Session, token: str) -> None:
 
 
 def revoke_sessions(db: Session, user_id: str, keep: str | None = None) -> None:
+    # The account row first, as in everything else that changes how an account
+    # signs in: requests for one account then take their locks in one order
+    # (account, sessions, challenges) and wait for each other instead of deadlocking.
+    db.execute(select(User.id).where(User.id == user_id).with_for_update())
     q = update(UserSession).where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
     if keep:
         q = q.where(UserSession.id != keep)
@@ -178,8 +191,10 @@ def reset_password(db: Session, token: str, new_password: str) -> User:
 
 
 def change_password(db: Session, user: User, current: str, new: str, keep_session: str | None) -> None:
-    if not passwords.verify_password(user.password_hash, current):
-        raise AuthError("Your current password is not correct", 400)
+    """``user`` is the caller's own row, locked by the caller."""
+    now = utcnow()
+    _refuse_if_locked(user, now)
+    _need_password(db, user, current, now)
     problem = passwords.password_problem(new, email=user.email, name=user.name)
     if problem:
         raise AuthError(problem)
@@ -252,12 +267,30 @@ class LoginResult:
 
 
 def _count_failure(db: Session, user: User, now: datetime) -> None:
-    """A wrong password or a wrong code. Committed here, so the count survives
-    the error the caller raises next."""
-    user.failed_logins += 1
-    if user.failed_logins >= MAX_FAILED_LOGINS:
-        user.failed_logins, user.locked_until = 0, now + timedelta(minutes=LOCK_MINUTES)
+    """A wrong password or a wrong code, at sign-in or on a signed-in page. The
+    database adds it up in one statement, so guesses sent at the same moment are
+    each counted, and the account locks at the limit. Committed here, so the
+    count survives the error the caller raises next."""
+    reached = User.failed_logins + 1 >= MAX_FAILED_LOGINS
+    db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(
+            failed_logins=case((reached, 0), else_=User.failed_logins + 1),
+            locked_until=case((reached, now + timedelta(minutes=LOCK_MINUTES)), else_=User.locked_until),
+        )
+        .execution_options(synchronize_session=False)
+    )
     db.commit()
+
+
+def _need_password(db: Session, user: User, password: str, now: datetime) -> None:
+    """The password, asked for again on a signed-in page. A wrong one counts
+    towards the lock-out as it does at sign-in: an open session must not be a
+    place to guess it without limit."""
+    if not passwords.verify_password(user.password_hash, password):
+        _count_failure(db, user, now)
+        raise AuthError("Your current password is not correct")
 
 
 def login(
@@ -267,12 +300,19 @@ def login(
     if user is None:
         passwords.burn(password)
         raise BAD_LOGIN
-    now = utcnow()
-    if user.locked_until is not None and user.locked_until > now:
-        raise _locked()
-    if not passwords.verify_password(user.password_hash, password):
-        _count_failure(db, user, now)
+    _refuse_if_locked(user, utcnow())
+    checked = user.password_hash
+    if not passwords.verify_password(checked, password):
+        _count_failure(db, user, utcnow())
         raise BAD_LOGIN
+    # Checking a password is slow on purpose, and the row was not locked for it.
+    # Take the row now and look again: guesses sent at the same moment may have
+    # locked the account, or the password may have been changed, in the meantime.
+    user = db.get(User, user.id, with_for_update=True, populate_existing=True)
+    now = utcnow()
+    if user is None or user.password_hash != checked:
+        raise BAD_LOGIN
+    _refuse_if_locked(user, now)
     if user.disabled_at is not None:
         raise AuthError("This account is disabled", 403, "FORBIDDEN")
     if passwords.needs_rehash(user.password_hash):
@@ -302,17 +342,18 @@ def complete_login(
 ) -> tuple[LoginResult, str]:
     """The second step of sign-in: the session, and which factor opened it
     (``"totp"`` or ``"recovery_code"``)."""
-    # Both rows are locked, the challenge first, so two requests carrying the
-    # same code cannot both get a session.
-    row = db.get(LoginChallenge, sha256_hex(challenge or ""), with_for_update=True)
+    # The account row is locked before anything is checked, and the challenge
+    # after it, so two requests carrying the same code cannot both get a session.
+    challenge_id = sha256_hex(challenge or "")
+    user_id = db.scalar(select(LoginChallenge.user_id).where(LoginChallenge.id == challenge_id))
+    user = db.get(User, user_id, with_for_update=True, populate_existing=True) if user_id else None
+    row = db.get(LoginChallenge, challenge_id, with_for_update=True, populate_existing=True) if user else None
     now = utcnow()
-    if row is None or row.used_at is not None or row.expires_at <= now:
+    if user is None or row is None or row.used_at is not None or row.expires_at <= now:
         raise _challenge_expired()
-    user = db.get(User, row.user_id, with_for_update=True, populate_existing=True)
-    if user is None or user.disabled_at is not None or user.totp_enabled_at is None:
+    if user.disabled_at is not None or user.totp_enabled_at is None:
         raise _challenge_expired()
-    if user.locked_until is not None and user.locked_until > now:
-        raise _locked()
+    _refuse_if_locked(user, now)
     factor = _check_second_factor(db, vault, user, code)
     if factor is None:
         _count_failure(db, user, now)
@@ -360,12 +401,15 @@ def _check_second_factor(db: Session, vault: Vault, user: User, code: str) -> st
 
 def _require_password_and_factor(db: Session, vault: Vault, user: User, password: str, code: str) -> None:
     """Switching the factor off, or issuing new recovery codes, takes both: a
-    session and a password that fell into the wrong hands are not enough."""
+    session and a password that fell into the wrong hands are not enough. A wrong
+    password or code here counts towards the lock-out, as it does at sign-in."""
+    now = utcnow()
+    _refuse_if_locked(user, now)
     if user.totp_enabled_at is None:
         raise AuthError("Two-factor sign-in is not on for this account")
-    if not passwords.verify_password(user.password_hash, password):
-        raise AuthError("Your current password is not correct")
+    _need_password(db, user, password, now)
     if _check_second_factor(db, vault, user, code) is None:
+        _count_failure(db, user, now)
         raise AuthError(BAD_CODE)
 
 
@@ -389,39 +433,50 @@ def recovery_codes_left(db: Session, user_id: str) -> int:
 
 def begin_two_factor(db: Session, vault: Vault, settings: Settings, user: User, password: str) -> tuple[str, str]:
     """Start set-up. The new secret is stored, but sign-in asks for nothing until
-    a code made from it has been confirmed. Returns (secret, ``otpauth://`` link)."""
+    a code made from it has been confirmed, which has to happen within
+    ``SETUP_MINUTES``. Starting again replaces the secret of an unfinished
+    set-up. ``user`` is the caller's own row, locked by the caller (the same
+    goes for the functions below). Returns (secret, ``otpauth://`` link)."""
+    now = utcnow()
+    _refuse_if_locked(user, now)
     if user.totp_enabled_at is not None:
         raise AuthError("Two-factor sign-in is already on for this account", 409, "DUPLICATE")
-    if not passwords.verify_password(user.password_hash, password):
-        raise AuthError("Your current password is not correct")
+    _need_password(db, user, password, now)
     secret = totp.new_secret()
     user.totp_secret_enc, user.totp_last_step = vault.encrypt(secret, aad_totp(user.id)), None
-    user.updated_at = utcnow()
+    user.totp_started_at = user.updated_at = now
     return secret, totp.provisioning_uri(secret, user.email, settings.brand_name)
 
 
 def confirm_two_factor(db: Session, vault: Vault, user: User, code: str, keep_session: str | None) -> list[str]:
     """Finish set-up with a code from the app. Returns the recovery codes, which
     exist in readable form only in this answer."""
+    now = utcnow()
+    _refuse_if_locked(user, now)
     if user.totp_enabled_at is not None:
         raise AuthError("Two-factor sign-in is already on for this account", 409, "DUPLICATE")
-    if not user.totp_secret_enc:
-        raise AuthError("Start the set-up again")
+    if not user.totp_secret_enc or user.totp_started_at is None:
+        raise _setup_expired("There is no set-up to finish. Start it again.")
+    # A set-up left unfinished must not stay open: this step takes a code and no
+    # password, so whoever holds a session later could keep guessing at it.
+    if now - user.totp_started_at > timedelta(minutes=SETUP_MINUTES):
+        raise _setup_expired("This set-up took too long and has expired. Start it again.")
     step = totp.verify(_totp_secret(vault, user), code)
     if step is None:
+        _count_failure(db, user, now)
         raise AuthError(
             "That code is not correct. Check that your phone sets its clock automatically, then use the newest code."
         )
-    now = utcnow()
     user.totp_enabled_at, user.totp_last_step, user.updated_at = now, step, now
+    user.totp_started_at = None
     codes = _new_recovery_codes(db, user)
     revoke_sessions(db, user.id, keep=keep_session)
     return codes
 
 
 def clear_two_factor(db: Session, user: User) -> None:
-    """Remove the factor and everything that belongs to it."""
-    user.totp_secret_enc = user.totp_enabled_at = user.totp_last_step = None
+    """Remove the factor, or an unfinished set-up, and everything that belongs to it."""
+    user.totp_secret_enc = user.totp_enabled_at = user.totp_last_step = user.totp_started_at = None
     user.updated_at = utcnow()
     db.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user.id))
 

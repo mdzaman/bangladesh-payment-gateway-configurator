@@ -8,6 +8,12 @@
   anyone who changes things in live mode. The set-up QR code is drawn in the browser.
 * New command `bdpay-cloud disable-two-factor --email <address>` for someone who has
   lost both their phone and their recovery codes.
+* Changed: a wrong password typed on the account page (changing the password, or any
+  change to two-factor sign-in) now counts towards the account lock-out, as a wrong code
+  does, and a locked account is refused there too. Changing the password is rate limited.
+* Changed: failed sign-ins are added up by the database in one statement, so guesses
+  sent in parallel are each counted, and sign-in looks at the lock again after the
+  password has been checked.
 * Upgrading: run `bdpay-cloud migrate` (revision `0002`; it only adds nullable columns
   and two tables). `rotate-keys` re-encrypts the new two-factor secrets as well.
 * Fixed: signing out left the dashboard on screen, showing "Sign in to continue" errors,

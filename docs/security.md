@@ -102,8 +102,15 @@ and is refused in production.
   change or reset ends other sessions.
 * Writes need the per-session CSRF token in `X-CSRF-Token`; in production the `Origin`
   header must also match. No CORS headers are sent, so other sites cannot call the API.
-* Login: rate limited per address and per account, account lock after eight failures,
-  identical answer for "no such account" and "wrong password", with equalised timing.
+* Login: rate limited per address and per account, account lock for 15 minutes after
+  eight failures, identical answer for "no such account" and "wrong password", with
+  equalised timing. The failures are added up by the database in one statement, so
+  guesses sent in parallel are each counted, and a password that turns out to be right
+  is refused if the account locked while it was being checked.
+* Where a signed-in page asks for the password again (changing it, and every change to
+  two-factor sign-in), a wrong one counts towards the same lock, and a locked account is
+  refused there too. A session that fell into the wrong hands is not a place to guess
+  the password without limit.
 * Roles: owner, admin, developer, analyst. Changing things in live mode needs admin;
   live mode itself can only be activated by an owner with a confirmed email.
 
@@ -132,9 +139,15 @@ digits, 30 seconds). Owners can require it of anyone who changes things in live 
   to the audit log and the account holder is emailed.
 * **Changing it takes both factors.** Starting set-up needs the password. Switching the
   factor off, or issuing new recovery codes, needs the password and a current code (or
-  a recovery code), so a hijacked session cannot remove it. These attempts are rate
-  limited per account. Switching it on or off signs out every other device and emails
-  the account holder.
+  a recovery code), so a hijacked session cannot remove it. A wrong password or code on
+  these pages counts towards the same lock-out as at sign-in, and a locked account is
+  refused there as well. They are also rate limited per account (ten tries per 15
+  minutes, shared with changing the password). Switching it on or off signs out every
+  other device and emails the account holder.
+* **An unfinished set-up expires.** The first code has to arrive within 15 minutes of
+  starting. After that the set-up has to be started again, which takes the password,
+  and housekeeping deletes the unused secret. Without this, a set-up someone walked
+  away from could be confirmed much later with a code alone.
 * **A password reset does not get past it.** The emailed link sets a password and
   creates no session; the next sign-in still asks for the code. For an account with the
   factor on, a reset also leaves the failed-attempt counter alone, so controlling the

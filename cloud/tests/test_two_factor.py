@@ -8,11 +8,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 
 from bdpay_cloud import migrate
 from bdpay_cloud.crypto import Vault, aad_totp
-from bdpay_cloud.security import totp
+from bdpay_cloud.db import utcnow
+from bdpay_cloud.models import User
+from bdpay_cloud.security import passwords, totp
+from bdpay_cloud.services import auth
 from bdpay_cloud.workers import housekeeping
 
 from conftest import TEST_KEYS
@@ -131,13 +134,14 @@ def test_set_up_and_confirm(dash, new_client, rt, clock):
     assert dash.get("/api/auth/two-factor").json() == {"enabled": False, "enabled_at": None, "recovery_codes_left": 0}
     assert dash.c.post("/api/auth/two-factor/setup", json={"current_password": PASSWORD}).status_code == 403  # CSRF
     assert dash.post("/api/auth/two-factor/setup", {"current_password": "not my password"}).status_code == 400
-    assert dash.post("/api/auth/two-factor/enable", {"code": "123456"}).status_code == 400  # nothing to confirm yet
+    r = dash.post("/api/auth/two-factor/enable", {"code": "123456"})  # nothing to confirm yet
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "SETUP_EXPIRED"
     other = Dash(new_client())
     assert other.login(dash.email).status_code == 200
 
     made = dash.post("/api/auth/two-factor/setup", {"current_password": PASSWORD}).json()
     secret = made["secret"]
-    assert re.fullmatch(r"[A-Z2-7]{32}", secret)
+    assert re.fullmatch(r"[A-Z2-7]{32}", secret) and made["expires_in"] == 900
     assert made["otpauth_uri"].startswith("otpauth://totp/bdpay%20cloud:") and f"secret={secret}" in made["otpauth_uri"]
     # Not on yet: signing in still takes the password alone, and nothing is asked for.
     assert Dash(new_client()).login(dash.email).json()["user"]["two_factor_enabled"] is False
@@ -174,6 +178,52 @@ def test_set_up_and_confirm(dash, new_client, rt, clock):
     r = dash.post("/api/auth/two-factor/setup", {"current_password": PASSWORD})
     assert r.status_code == 409 and r.json()["detail"]["code"] == "DUPLICATE"
     assert dash.post("/api/auth/two-factor/enable", {"code": code_for(secret, 1)}).status_code == 409
+
+
+def test_an_unfinished_set_up_expires(dash, rt, clock):
+    secret = dash.post("/api/auth/two-factor/setup", {"current_password": PASSWORD}).json()["secret"]
+    assert user_row(rt, dash.email).totp_started_at is not None
+    with rt.engine.begin() as conn:  # sixteen minutes go by
+        conn.execute(
+            text("UPDATE users SET totp_started_at = now() - interval '16 minutes' WHERE email = :e"), {"e": dash.email}
+        )
+    r = dash.post("/api/auth/two-factor/enable", {"code": code_for(secret)})  # the right code, too late
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "SETUP_EXPIRED"
+    assert "expired" in r.json()["detail"]["message"]
+    row = user_row(rt, dash.email)
+    assert row.totp_enabled_at is None and row.failed_logins == 0  # late is not a wrong guess
+    assert dash.get("/api/auth/two-factor").json()["enabled"] is False
+
+    # Starting again makes a new secret, and only that one can be confirmed.
+    again = dash.post("/api/auth/two-factor/setup", {"current_password": PASSWORD}).json()["secret"]
+    assert again != secret
+    if code_for(secret) not in {code_for(again, o) for o in (-1, 0, 1)}:
+        assert dash.post("/api/auth/two-factor/enable", {"code": code_for(secret)}).status_code == 400
+    assert dash.post("/api/auth/two-factor/enable", {"code": code_for(again)}).status_code == 200
+    row = user_row(rt, dash.email)
+    assert row.totp_enabled_at is not None and row.totp_started_at is None
+
+
+def test_housekeeping_forgets_abandoned_set_ups(dash, new_client, rt, clock):
+    fresh, on = Dash(new_client()), Dash(new_client())
+    fresh.signup()
+    on.signup()
+    for who in (dash, fresh):
+        assert who.post("/api/auth/two-factor/setup", {"current_password": PASSWORD}).status_code == 200
+    enrol(on)
+    with rt.engine.begin() as conn:  # dash walked away two days ago
+        conn.execute(
+            text("UPDATE users SET totp_started_at = now() - interval '2 days' WHERE email = :e"), {"e": dash.email}
+        )
+    assert housekeeping.run(rt)["two_factor_setups"] >= 1
+    gone = user_row(rt, dash.email)
+    assert gone.totp_secret_enc is None and gone.totp_started_at is None
+    # A set-up still in progress, and a factor that is on, are left alone.
+    assert user_row(rt, fresh.email).totp_secret_enc is not None
+    assert user_row(rt, on.email).totp_secret_enc is not None
+    assert housekeeping.run(rt)["two_factor_setups"] == 0
+    r = dash.post("/api/auth/two-factor/enable", {"code": "123456"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "SETUP_EXPIRED"
 
 
 def test_secrets_never_leave_after_set_up(dash, clock):
@@ -220,20 +270,23 @@ def test_a_code_cannot_be_replayed(dash, new_client, clock):
     assert finish(new_client(), start(new_client(), dash.email), code_for(secret)).status_code == 200
 
 
-def test_two_requests_with_the_same_code_get_one_session(dash, new_client, clock):
-    secret, _ = enrol(dash)
+def test_two_requests_with_the_same_code_get_one_session(dash, new_client, rt, clock):
+    secret, codes = enrol(dash)
     clock.tick()
-    code = code_for(secret)
-    attempts = [(c, start(c, dash.email)) for c in (new_client(), new_client(), new_client(), new_client())]
-    barrier = threading.Barrier(len(attempts))
+    for code in (code_for(secret), codes[0]):  # a code from the app, then a recovery code
+        attempts = [(c, start(c, dash.email)) for c in (new_client(), new_client(), new_client(), new_client())]
+        barrier = threading.Barrier(len(attempts))
 
-    def go(attempt):
-        barrier.wait()
-        return finish(*attempt, code).status_code
+        def go(attempt, code=code, barrier=barrier):
+            barrier.wait()
+            return finish(*attempt, code).status_code
 
-    with ThreadPoolExecutor(len(attempts)) as pool:
-        statuses = sorted(pool.map(go, attempts))
-    assert statuses == [200, 401, 401, 401]
+        with ThreadPoolExecutor(len(attempts)) as pool:
+            statuses = sorted(pool.map(go, attempts))
+        assert statuses == [200, 401, 401, 401], code
+        with rt.engine.begin() as conn:  # three refusals are three failed attempts: the next round starts clean
+            conn.execute(text("UPDATE users SET failed_logins = 0 WHERE email = :e"), {"e": dash.email})
+    assert dash.get("/api/auth/two-factor").json()["recovery_codes_left"] == 9
 
 
 def test_recovery_code_works_once(dash, new_client, rt, clock):
@@ -295,6 +348,115 @@ def test_wrong_codes_lock_the_account_and_a_right_password_does_not_reset_the_co
         )
     assert finish(new_client(), challenge, code_for(secret)).status_code == 200
     assert dash.get("/api/auth/two-factor").json()["recovery_codes_left"] == 10  # the refused one was not used up
+
+
+def test_failures_at_the_same_moment_are_each_counted(dash, new_client, app, rt):
+    # Two requests that have both read the account before either has failed.
+    a, b = rt.sessions(), rt.sessions()
+    try:
+        first = a.scalar(select(User).where(User.email == dash.email))
+        second = b.scalar(select(User).where(User.email == dash.email))
+        assert first.failed_logins == second.failed_logins == 0
+        auth._count_failure(a, first, utcnow())
+        auth._count_failure(b, second, utcnow())
+    finally:
+        a.close()
+        b.close()
+    assert user_row(rt, dash.email).failed_logins == 2
+
+    # And through the front door: eight wrong passwords sent at once lock the account.
+    with rt.engine.begin() as conn:
+        conn.execute(text("UPDATE users SET failed_logins = 0 WHERE email = :e"), {"e": dash.email})
+    clients = [new_client() for _ in range(8)]
+    app.state.limiter.reset()
+    barrier = threading.Barrier(len(clients))
+
+    def guess(c):
+        barrier.wait()
+        return c.post("/api/auth/login", json={"email": dash.email, "password": "definitely wrong"}).status_code
+
+    with ThreadPoolExecutor(len(clients)) as pool:
+        statuses = list(pool.map(guess, clients))
+    assert statuses == [401] * 8
+    row = user_row(rt, dash.email)
+    assert row.locked_until is not None and row.failed_logins == 0
+
+
+@pytest.mark.parametrize("meanwhile", ["locked", "password changed"])
+def test_a_right_password_is_checked_again_after_the_slow_part(dash, new_client, rt, monkeypatch, meanwhile):
+    """Checking a password takes a while and the account is not locked for it.
+    What happened in that time still counts."""
+    real = passwords.verify_password
+    change = (
+        "locked_until = now() + interval '15 minutes'"
+        if meanwhile == "locked"
+        else "password_hash = 'changed-meanwhile'"
+    )
+
+    def slow(stored, given):
+        ok = real(stored, given)
+        if ok:  # while this one was being checked, other requests got there first
+            with rt.engine.begin() as conn:
+                conn.execute(text(f"UPDATE users SET {change} WHERE email = :e"), {"e": dash.email})
+        return ok
+
+    monkeypatch.setattr(passwords, "verify_password", slow)
+    c = new_client()
+    r = c.post("/api/auth/login", json={"email": dash.email, "password": PASSWORD})
+    assert r.status_code == (429 if meanwhile == "locked" else 401) and "set-cookie" not in r.headers
+    assert c.get("/api/auth/me").status_code == 401
+
+
+def test_wrong_guesses_on_the_account_page_count_towards_the_lock(dash, new_client, app, rt, clock):
+    """A session someone else got hold of is not a free place to guess the password or a code."""
+    setup, enable = "/api/auth/two-factor/setup", "/api/auth/two-factor/enable"
+    off, renew, change = (
+        "/api/auth/two-factor/disable",
+        "/api/auth/two-factor/recovery-codes",
+        "/api/auth/change-password",
+    )
+    new_password = {"current_password": PASSWORD, "new_password": "another long password 1"}
+
+    def count() -> int:
+        return user_row(rt, dash.email).failed_logins
+
+    assert dash.post(setup, {"current_password": "not my password"}).status_code == 400 and count() == 1
+    assert dash.post(change, new_password | {"current_password": "not my password"}).status_code == 400 and count() == 2
+    secret = dash.post(setup, {"current_password": PASSWORD}).json()["secret"]
+    assert dash.post(enable, {"code": wrong_code(secret)}).status_code == 400 and count() == 3
+    assert dash.post(enable, {"code": code_for(secret)}).status_code == 200
+    assert count() == 3  # getting it right on this page does not wipe the count; only signing in does
+    clock.tick()
+    good = {"current_password": PASSWORD, "code": code_for(secret)}
+    assert dash.post(off, good | {"current_password": "not my password"}).status_code == 400 and count() == 4
+    assert dash.post(off, good | {"code": wrong_code(secret)}).status_code == 400 and count() == 5
+    assert dash.post(renew, good | {"current_password": "not my password"}).status_code == 400 and count() == 6
+    assert dash.post(renew, good | {"code": "not-a-recovery-code"}).status_code == 400 and count() == 7
+    app.state.limiter.reset()  # what follows is the account's own lock, not the rate limiter
+    assert dash.post(off, good | {"code": wrong_code(secret)}).status_code == 400  # the eighth
+    locked = user_row(rt, dash.email)
+    assert locked.locked_until is not None and locked.failed_logins == 0
+
+    # Locked: the right password and the right code get nowhere, on any of these pages or at sign-in.
+    attempts = (
+        (off, good),
+        (renew, good),
+        (change, new_password),
+        (setup, {"current_password": PASSWORD}),
+        (enable, {"code": code_for(secret)}),
+    )
+    for path, body in attempts:
+        r = dash.post(path, body)
+        assert r.status_code == 429 and "Too many failed attempts" in r.json()["detail"]["message"], path
+    assert new_client().post("/api/auth/login", json={"email": dash.email, "password": PASSWORD}).status_code == 429
+    # The session itself carries on, and nothing was changed or used up meanwhile.
+    status = dash.get("/api/auth/two-factor").json()
+    assert status["enabled"] is True and status["recovery_codes_left"] == 10
+    with rt.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE users SET locked_until = now() - interval '1 second' WHERE email = :e"), {"e": dash.email}
+        )
+    assert dash.post(off, good).status_code == 200
 
 
 def test_the_code_step_is_rate_limited(dash, new_client, rt, clock):
@@ -407,6 +569,7 @@ def test_switching_off_takes_the_password_and_a_code(dash, new_client, rt, clock
     assert other.get("/api/auth/me").status_code == 401
     row = user_row(rt, dash.email)
     assert row.totp_secret_enc is None and row.totp_enabled_at is None and row.totp_last_step is None
+    assert row.totp_started_at is None
     with rt.engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM recovery_codes WHERE user_id = :u"), {"u": row.id}).scalar() == 0
     assert "two-factor sign-in was turned off" in last_email(rt, dash.email)["subject"]
@@ -436,10 +599,22 @@ def test_new_recovery_codes_replace_the_old_ones(dash, new_client, rt, clock):
     assert finish(new_client(), start(new_client(), dash.email), new[0]).status_code == 200
 
 
-def test_changes_to_two_factor_are_rate_limited(dash, clock):
+def test_changes_to_two_factor_are_rate_limited(dash, new_client, rt, clock):
     secret = dash.post("/api/auth/two-factor/setup", {"current_password": PASSWORD}).json()["secret"]
-    statuses = [dash.post("/api/auth/two-factor/enable", {"code": wrong_code(secret)}).status_code for _ in range(11)]
+    statuses = []
+    for _ in range(11):
+        with rt.engine.begin() as conn:  # keep the account lock out of the way: this is about the limiter
+            conn.execute(
+                text("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE email = :e"), {"e": dash.email}
+            )
+        statuses.append(dash.post("/api/auth/two-factor/enable", {"code": wrong_code(secret)}).status_code)
     assert statuses[:9] == [400] * 9 and statuses[9:] == [429, 429]
+    # Changing the password asks for the password again too, and draws on the same few tries.
+    r = dash.post(
+        "/api/auth/change-password", {"current_password": PASSWORD, "new_password": "another long password 1"}
+    )
+    assert r.status_code == 429 and r.headers["retry-after"]
+    assert Dash(new_client()).login(dash.email).status_code == 200  # the password was not changed
 
 
 # ------------------------------------------------------------- keys and operator
@@ -512,7 +687,13 @@ def test_operator_can_switch_it_off_for_someone_locked_out(monkeypatch, capsys, 
         ).scalar()
     assert left == 0 and reset == "system"
     assert "turned off by the operator" in last_email(rt, dash.email)["subject"]
-    assert Dash(new_client()).login(dash.email).status_code == 200
+    again = Dash(new_client())
+    assert again.login(dash.email).status_code == 200
+    # A set-up that was started and never finished is removed the same way.
+    assert again.post("/api/auth/two-factor/setup", {"current_password": PASSWORD}).status_code == 200
+    assert run_cli(monkeypatch, capsys, "disable-two-factor", "--email", dash.email)[0] == 0
+    row = user_row(rt, dash.email)
+    assert row.totp_secret_enc is None and row.totp_started_at is None
     code, out, _ = run_cli(monkeypatch, capsys, "disable-two-factor", "--email", dash.email)
     assert code == 0 and "nothing to do" in out
     code, _, err = run_cli(monkeypatch, capsys, "disable-two-factor", "--email", "nobody@example.com")
@@ -523,7 +704,7 @@ def test_migration_0002_applies_and_reverts(settings):
     name = "bdpay_cloud_test_2fa_" + uuid.uuid4().hex[:8]
     admin = create_engine(settings.database_url, isolation_level="AUTOCOMMIT")
     url = settings.database_url.rsplit("/", 1)[0] + "/" + name
-    added = {"totp_secret_enc", "totp_enabled_at", "totp_last_step"}
+    added = {"totp_secret_enc", "totp_enabled_at", "totp_started_at", "totp_last_step"}
     try:
         with admin.connect() as conn:
             conn.execute(text(f'CREATE DATABASE "{name}"'))

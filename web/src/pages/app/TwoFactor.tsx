@@ -1,7 +1,8 @@
 // Two-factor sign-in on the account page: set it up with an authenticator app,
 // keep recovery codes, switch it off. The QR code is drawn here in the browser.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { ApiError } from "../../api/client";
 import * as api from "../../api/endpoints";
 import type { TwoFactorSetup } from "../../api/types";
 import { encodeQr, qrPath } from "../../lib/qr";
@@ -48,6 +49,8 @@ function RecoveryCodes({ codes, email, onDone }: { codes: string[]; email: strin
   );
 }
 
+const SETUP_EXPIRED = "This set-up took too long and has expired. Start it again.";
+
 export default function TwoFactorCard() {
   const { me, refresh } = useSession();
   const toast = useToast();
@@ -59,6 +62,15 @@ export default function TwoFactorCard() {
   const [code, setCode] = useState("");
   const [codes, setCodes] = useState<string[] | null>(null);
   const [dialog, setDialog] = useState<"off" | "codes" | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // The server stops accepting a code for a set-up after a while. Take the QR
+  // code off the screen at that moment, so nobody scans one that is already dead.
+  useEffect(() => {
+    if (!setup) return;
+    const timer = setTimeout(() => { setSetup(null); setCode(""); setNotice(SETUP_EXPIRED); }, setup.expires_in * 1000);
+    return () => clearTimeout(timer);
+  }, [setup]);
 
   // Switching it on or off signs every other device out, so the device list changes too.
   const changed = async () => {
@@ -71,7 +83,10 @@ export default function TwoFactorCard() {
   const enable = useMutation({
     mutationFn: () => api.twoFactor.enable(code),
     onSuccess: async (data) => { setCodes(data.recovery_codes); setSetup(null); setCode(""); await changed(); },
-    onError: () => setCode(""),
+    onError: (error) => {
+      setCode("");
+      if (error instanceof ApiError && error.code === "SETUP_EXPIRED") { setSetup(null); setNotice(error.message); }
+    },
   });
   const confirm = useMutation({
     mutationFn: async (): Promise<string[] | null> => {
@@ -125,7 +140,9 @@ export default function TwoFactorCard() {
             <div>
               <p><b>1.</b> Scan this with your authenticator app. If you cannot scan it, add an account in the app by hand and type this key:</p>
               <div className="urlrow"><code aria-label="Set-up key">{key}</code><CopyButton text={setup.secret} /></div>
-              <p style={{ marginTop: 14 }}><b>2.</b> Enter the 6-digit code the app shows now.</p>
+              <p style={{ marginTop: 14 }}>
+                <b>2.</b> Enter the 6-digit code the app shows now. This set-up waits {Math.round(setup.expires_in / 60)} minutes for it.
+              </p>
               <TextField label="Code" className="otp" value={code} onChange={setCode} required inputMode="numeric" autoComplete="one-time-code"
                 maxLength={12} placeholder="123456" style={{ maxWidth: 220 }} />
               <FormError error={enable.error} />
@@ -148,11 +165,14 @@ export default function TwoFactorCard() {
         </form>
       ) : (
         <>
+          {notice && <p className="info warn small" role="status">{notice}</p>}
           <p className="lede">
             Ask for a code from an authenticator app on your phone as well as your password. A stolen or guessed password is then not enough to get in.
             Any app that makes 6-digit codes works: Google Authenticator, Microsoft Authenticator, Authy, 1Password and others.
           </p>
-          <button type="button" className="primary" onClick={() => { begin.reset(); setAsking(true); }}>Set up two-factor sign-in</button>
+          <button type="button" className="primary" onClick={() => { begin.reset(); enable.reset(); setNotice(null); setAsking(true); }}>
+            Set up two-factor sign-in
+          </button>
         </>
       )}
 

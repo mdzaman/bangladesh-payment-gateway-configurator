@@ -59,6 +59,8 @@ export interface TwoFactorSetup {
   secret: string;
   /** The same thing as an otpauth:// link, for the QR code. */
   otpauth_uri: string;
+  /** Seconds this set-up waits for its first code before it has to be started again. */
+  expires_in: number;
 }
 
 export interface Platform {

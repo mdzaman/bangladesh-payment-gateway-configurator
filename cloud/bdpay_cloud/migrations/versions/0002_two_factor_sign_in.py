@@ -49,11 +49,13 @@ def upgrade() -> None:
     op.create_index(op.f("ix_recovery_codes_user_id"), "recovery_codes", ["user_id"], unique=False)
     op.add_column("users", sa.Column("totp_secret_enc", sa.Text(), nullable=True))
     op.add_column("users", sa.Column("totp_enabled_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column("users", sa.Column("totp_started_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("users", sa.Column("totp_last_step", sa.BigInteger(), nullable=True))
 
 
 def downgrade() -> None:
     op.drop_column("users", "totp_last_step")
+    op.drop_column("users", "totp_started_at")
     op.drop_column("users", "totp_enabled_at")
     op.drop_column("users", "totp_secret_enc")
     op.drop_index(op.f("ix_recovery_codes_user_id"), table_name="recovery_codes")
