@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}{{ t('paid_title') if paid else t('result_other', status=t('s_' ~ order.status.value)) }}{% endblock %}
+{% block body %}
+    {% if paid %}<p class="tick" aria-hidden="true"></p>{% endif %}
+    <h1 class="title {{ 'ok' if paid else 'bad' }}">{{ t('paid_title') if paid else t('result_other', status=t('s_' ~ order.status.value)) }}</h1>
+    <dl class="facts">
+      <div><dt>{{ t('order') }}</dt><dd>{{ order.order_id }}</dd></div>
+      <div><dt>{{ t('amount') }}</dt><dd>{{ amount }}</dd></div>
+      <div><dt>{{ t('status') }}</dt><dd>{{ t('s_' ~ order.status.value) }}</dd></div>
+    </dl>
+    {% if order.status.value == 'needs_review' %}<p class="note warn">{{ t('review_note') }}</p>{% endif %}
+    {% if order.status.value == 'pending' %}<p class="note warn">{{ t('pending_note') }}</p><p><a class="button quiet" href="">{{ t('refresh') }}</a></p>{% endif %}
+{% endblock %}

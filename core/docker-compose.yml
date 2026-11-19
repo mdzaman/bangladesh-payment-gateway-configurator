@@ -1,0 +1,29 @@
+# docker compose up -d --build   ->  http://localhost:8000
+services:
+  bdpay:
+    build: .
+    env_file: .env
+    environment:
+      BDPAY_DB: /data/bdpay.sqlite3
+      BDPAY_DOTENV: /nonexistent        # env comes from env_file, not a copied .env
+    ports: ["8000:8000"]
+    volumes:
+      - bdpay-data:/data
+      - ./keys:/app/keys:ro
+    restart: unless-stopped
+
+  # Re-checks payments left pending (closed tabs, lost callbacks) every 10 minutes.
+  reconcile:
+    build: .
+    env_file: .env
+    environment:
+      BDPAY_DB: /data/bdpay.sqlite3
+      BDPAY_DOTENV: /nonexistent
+    volumes:
+      - bdpay-data:/data
+      - ./keys:/app/keys:ro
+    command: ["sh", "-c", "while true; do python -m bdpay reconcile; sleep 600; done"]
+    restart: unless-stopped
+
+volumes:
+  bdpay-data: {}

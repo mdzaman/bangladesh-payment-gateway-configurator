@@ -1,0 +1,100 @@
+# bdpay cloud on one server:  docker compose up -d --build
+#
+#   first try      nothing to configure: http://localhost:8080 in development mode
+#   production     copy .env.example to .env and set at least
+#                    BDPAY_CLOUD_ENV=production
+#                    BDPAY_SITE_ADDRESS=pay.example.com
+#                    BDPAY_CLOUD_PUBLIC_URL=https://pay.example.com
+#                    BDPAY_CLOUD_MASTER_KEYS=...   (docker compose run --rm api gen-key)
+#                    POSTGRES_PASSWORD=...
+#                    BDPAY_CLOUD_MAIL_BACKEND=smtp + BDPAY_CLOUD_SMTP_*
+#                    BDPAY_HTTP_PORT=80
+#                  See docs/self-hosting.md.
+name: bdpay-cloud
+
+x-app: &app
+  build: .
+  image: bdpay-cloud:local
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    BDPAY_CLOUD_ENV: ${BDPAY_CLOUD_ENV:-development}
+    BDPAY_CLOUD_PUBLIC_URL: ${BDPAY_CLOUD_PUBLIC_URL:-http://localhost:8080}
+    BDPAY_CLOUD_DATABASE_URL: postgresql+psycopg://bdpay:${POSTGRES_PASSWORD:-bdpay}@postgres:5432/bdpay_cloud
+    BDPAY_CLOUD_REDIS_URL: redis://redis:6379/0
+    BDPAY_CLOUD_WEB_DIST: /app/web-dist
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      BDPAY_SITE_ADDRESS: ${BDPAY_SITE_ADDRESS:-http://localhost}
+    ports:
+      - "${BDPAY_HTTP_PORT:-8080}:80"
+      - "${BDPAY_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api: { condition: service_healthy }
+
+  # Brings the schema up to date, then exits. Safe to run from several places at once.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["migrate"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    <<: *app
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  # Delivers webhooks, re-checks pending payments, sends email. Scale with
+  # `docker compose up -d --scale worker=3`.
+  worker:
+    <<: *app
+    command: ["worker"]
+    healthcheck: { disable: true }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bdpay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bdpay}
+      POSTGRES_DB: bdpay_cloud
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bdpay -d bdpay_cloud"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata: {}
+  caddy-data: {}
+  caddy-config: {}

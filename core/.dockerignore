@@ -1,0 +1,8 @@
+.env
+.env.*
+keys/
+*.sqlite3*
+__pycache__/
+.pytest_cache/
+.git/
+tests/

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{{ t(key ~ '_title') }}{% endblock %}
+{% block body %}
+    <h1 class="title">{{ t(key ~ '_title') }}</h1>
+    <p class="lead">{{ t(key ~ '_body') }}</p>
+    {% if link %}<p><a class="button" href="{{ link[0] }}">{{ t(link[1]) }}</a></p>{% endif %}
+{% endblock %}

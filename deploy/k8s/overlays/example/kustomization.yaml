@@ -1,0 +1,30 @@
+# Copy this folder, change the four values below, then:
+#   kubectl create namespace bdpay
+#   kubectl -n bdpay create secret generic bdpay-cloud ...   (see ../../base/secret.example.yaml)
+#   kubectl apply -k deploy/k8s/overlays/<your-copy>
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: bdpay
+resources:
+  - ../../base
+images:
+  - name: bdpay-cloud
+    newName: registry.example.com/bdpay-cloud
+    newTag: "1.0.0"
+patches:
+  - target: { kind: ConfigMap, name: bdpay-cloud }
+    patch: |
+      - op: replace
+        path: /data/BDPAY_CLOUD_PUBLIC_URL
+        value: https://pay.example.com
+      - op: replace
+        path: /data/BDPAY_CLOUD_EGRESS_IPS
+        value: "203.0.113.10"
+  - target: { kind: Ingress, name: bdpay-cloud }
+    patch: |
+      - op: replace
+        path: /spec/rules/0/host
+        value: pay.example.com
+      - op: replace
+        path: /spec/tls/0/hosts/0
+        value: pay.example.com

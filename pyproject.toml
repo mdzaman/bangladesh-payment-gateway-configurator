@@ -1,0 +1,106 @@
+[project]
+name = "bdpay-cloud"
+version = "1.0.0"
+description = "Open-source, multi-tenant, non-custodial payment gateway configurator and orchestration service for Bangladesh (bKash, Nagad, SSLCOMMERZ, aamarPay, shurjoPay, EPS, PortPos, PayStation, Upay)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Mohammad M. Zaman" }]
+keywords = ["bangladesh", "payments", "bkash", "nagad", "sslcommerz", "payment-gateway", "saas"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Office/Business :: Financial :: Point-Of-Sale",
+]
+dependencies = [
+  # the vendored reference engine in core/ needs these
+  "httpx>=0.27,<1",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "python-multipart>=0.0.9",
+  "cryptography>=42",
+  # the multi-tenant service
+  "sqlalchemy>=2.0.30",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.13",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "email-validator>=2.1",
+  "argon2-cffi>=23.1",
+  "jinja2>=3.1",
+  "prometheus-client>=0.20",
+  "redis>=5",
+]
+
+[project.scripts]
+bdpay-cloud = "bdpay_cloud.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/mdzaman/bangladesh-payment-gateway-configurator/tree/main/docs"
+Source = "https://github.com/mdzaman/bangladesh-payment-gateway-configurator"
+Issues = "https://github.com/mdzaman/bangladesh-payment-gateway-configurator/issues"
+Changelog = "https://github.com/mdzaman/bangladesh-payment-gateway-configurator/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "httpx2>=2.0",   # starlette's TestClient prefers it over httpx
+  "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# One distribution, two import packages:
+#   bdpay        the reference engine, kept byte-for-byte as in the build spec (core/)
+#   bdpay_cloud  the multi-tenant service built around it (cloud/)
+[tool.hatch.build.targets.wheel]
+packages = ["core/bdpay", "cloud/bdpay_cloud"]
+
+[tool.hatch.build.targets.sdist]
+include = ["core/bdpay", "cloud/bdpay_cloud", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["cloud/tests"]
+addopts = "-q --import-mode=importlib"
+filterwarnings = ["error::sqlalchemy.exc.SAWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+# core/ is the reference engine and docs/reference is the spec it is checked against,
+# byte for byte. Neither may be reformatted (ruff also formats Python inside Markdown).
+extend-exclude = ["core", "web", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "C4", "SIM", "RUF"]
+ignore = [
+  "S101",    # assert in tests
+  "B008",    # FastAPI Depends() in defaults
+  "S105", "S106", "S107",  # "possible hardcoded password" false positives on field names
+  "RUF012",
+  "UP017",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bdpay", "bdpay_cloud"]
+known-local-folder = ["helpers", "conftest"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests favour one assertion per line over the line limit.
+"cloud/tests/*" = ["S", "B", "SIM", "E501", "E731", "RUF001", "RUF003", "RUF015"]
+"cloud/bdpay_cloud/migrations/*" = ["E501", "I001"]
+# SQL text in these two files is assembled from module constants only (column
+# lists, the tenant filter, the back-off CASE). Every value is a bound parameter.
+"cloud/bdpay_cloud/engine/store.py" = ["S608"]
+"cloud/bdpay_cloud/workers/reconcile.py" = ["S608"]
+# Customer-facing Bangla text and the taka sign are intentional.
+"cloud/bdpay_cloud/api/hosted.py" = ["RUF001"]

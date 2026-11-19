@@ -1,0 +1,176 @@
+{
+  "_comment": "Single source of truth for gateway forms. Read by the service (validation, which fields are secret) and bundled into the web app (dashboard configurator and the self-host generator). Field types: text | secret | textarea (key material, secret) | select | check. 'demo' values are published sandbox data and are refused in live mode.",
+  "gateways": [
+    {
+      "id": "bkash", "name": "bKash", "kind": "Mobile wallet", "st": "stable", "refund": "Partial",
+      "verify": "Execute, then query on timeout", "docs": "https://developer.bka.sh",
+      "get": "Apply for a bKash merchant account (PGW / Tokenized Checkout). bKash sends sandbox credentials, then live ones after review.",
+      "sandbox": "Ask bKash, or use the community demo profile below.",
+      "test": "Wallet 01770618575, OTP 123456, PIN 12121 (bKash demo page)",
+      "need": ["App key and app secret", "Username and password for the token API", "Your callback is generated automatically"],
+      "demoNote": "Demo values are widely shared by the community, not published by bKash; they may stop working. Use your own for real tests.",
+      "checkout": {"label": "bKash", "hint": "Pay from your bKash wallet", "label_bn": "বিকাশ", "hint_bn": "আপনার বিকাশ ওয়ালেট থেকে পেমেন্ট করুন"},
+      "f": [
+        {"k": "BKASH_APP_KEY", "l": "App key", "t": "text", "req": 1, "demo": "4f6o0cjiki2rfm34kfdadl1eqq"},
+        {"k": "BKASH_APP_SECRET", "l": "App secret", "t": "secret", "req": 1, "demo": "2is7hdktrekvrbljjh44ll3d9l1dtjo4pasmjvs5vl5qr3fug4b"},
+        {"k": "BKASH_USERNAME", "l": "Username", "t": "text", "req": 1, "demo": "sandboxTokenizedUser02"},
+        {"k": "BKASH_PASSWORD", "l": "Password", "t": "secret", "req": 1, "demo": "sandboxTokenizedUser02@12345"},
+        {"k": "BKASH_API_VERSION", "l": "API version", "t": "text", "help": "Change only if bKash tells you to.", "val": "v1.2.0-beta"}
+      ]
+    },
+    {
+      "id": "nagad", "name": "Nagad", "kind": "Mobile wallet", "st": "stable", "refund": "Panel",
+      "verify": "RSA signature, then verify API", "docs": "https://github.com/theshakhawat/nagad-payment-gateway-documentation",
+      "get": "Contact Nagad merchant onboarding. They email a merchant ID, the Nagad public key, and a pack; you generate your RSA key pair and send them your public key. Live needs your server IP and domain whitelisted.",
+      "sandbox": "Through your Nagad account manager only", "test": "Sandbox wallet numbers come with the pack",
+      "need": ["Merchant ID", "Merchant wallet number", "Your merchant private key (PEM or bare base64)", "Nagad public key (PEM or bare base64)", "Your server public IPv4 for whitelisting"],
+      "whitelist": true,
+      "checkout": {"label": "Nagad", "hint": "Pay from your Nagad wallet", "label_bn": "নগদ", "hint_bn": "আপনার নগদ ওয়ালেট থেকে পেমেন্ট করুন"},
+      "f": [
+        {"k": "NAGAD_MERCHANT_ID", "l": "Merchant ID", "t": "text", "req": 1},
+        {"k": "NAGAD_MERCHANT_NUMBER", "l": "Merchant wallet number", "t": "text", "help": "The 11-digit merchant account number."},
+        {"k": "NAGAD_PRIVATE_KEY", "l": "Your merchant private key", "t": "textarea", "req": 1, "file": "keys/nagad_merchant_private.pem", "env": "NAGAD_PRIVATE_KEY_PATH", "help": "Saved to keys/ (git-ignored), never into code.", "cloudHelp": "Stored encrypted. It is never shown again after saving."},
+        {"k": "NAGAD_PUBLIC_KEY", "l": "Nagad public key", "t": "textarea", "req": 1, "file": "keys/nagad_public.pem", "env": "NAGAD_PUBLIC_KEY_PATH"},
+        {"k": "NAGAD_CLIENT_IP", "l": "Server IPv4 (X-KM-IP-V4)", "t": "text", "help": "Your whitelisted public IP; customer IP is used when you pass it.", "val": "127.0.0.1", "cloudHelp": "Leave empty to use this service's outbound address.", "cloudVal": ""},
+        {"k": "NAGAD_BASE_URL", "l": "Base URL override", "t": "text", "url": true, "help": "Leave empty unless your pack gives a different host or port."}
+      ]
+    },
+    {
+      "id": "sslcommerz", "name": "SSLCOMMERZ", "kind": "Aggregator: cards, banks, all wallets", "st": "stable", "refund": "Partial",
+      "verify": "verify_sign, Validation API, amount match", "docs": "https://developer.sslcommerz.com/doc/v4/",
+      "get": "Register a free sandbox store at developer.sslcommerz.com/registration; the store ID and password arrive by email. Live needs merchant onboarding.",
+      "sandbox": "Self-register online", "test": "Use the test cards and mobile banking options shown on the sandbox payment page",
+      "need": ["Store ID", "Store password (API password, not your panel login)", "Set the IPN URL in the panel (generated for you)"],
+      "demoNote": "testbox / qwerty are the sample values from the SSLCOMMERZ docs; register your own sandbox store for working tests.",
+      "ipn": true,
+      "checkout": {"label": "Card, bank or wallet", "hint": "Visa, Mastercard, Amex, internet banking, Rocket and more, through SSLCOMMERZ", "label_bn": "কার্ড, ব্যাংক বা ওয়ালেট", "hint_bn": "ভিসা, মাস্টারকার্ড, ইন্টারনেট ব্যাংকিং, রকেট ও অন্যান্য (SSLCOMMERZ)"},
+      "f": [
+        {"k": "SSLCOMMERZ_STORE_ID", "l": "Store ID", "t": "text", "req": 1, "demo": "testbox"},
+        {"k": "SSLCOMMERZ_STORE_PASSWORD", "l": "Store password", "t": "secret", "req": 1, "demo": "qwerty"}
+      ]
+    },
+    {
+      "id": "aamarpay", "name": "aamarPay", "kind": "Aggregator", "st": "stable", "refund": "Panel",
+      "verify": "Search Transaction API", "docs": "https://developer.aamarpay.com/",
+      "get": "Public test store works immediately. Live: sign up with aamarPay for a store ID and signature key.",
+      "sandbox": "None needed", "test": "Store aamarpaytest, key dbb74894e82415a2f7ff0ec3a97e4183 (aamarPay docs)",
+      "need": ["Store ID", "Signature key"],
+      "demoNote": "Official aamarPay public test store.",
+      "checkout": {"label": "Card, bank or wallet", "hint": "Cards, internet banking and mobile wallets, through aamarPay", "label_bn": "কার্ড, ব্যাংক বা ওয়ালেট", "hint_bn": "কার্ড, ইন্টারনেট ব্যাংকিং ও মোবাইল ওয়ালেট (aamarPay)"},
+      "f": [
+        {"k": "AAMARPAY_STORE_ID", "l": "Store ID", "t": "text", "req": 1, "demo": "aamarpaytest"},
+        {"k": "AAMARPAY_SIGNATURE_KEY", "l": "Signature key", "t": "secret", "req": 1, "demo": "dbb74894e82415a2f7ff0ec3a97e4183"}
+      ]
+    },
+    {
+      "id": "shurjopay", "name": "shurjoPay", "kind": "Aggregator", "st": "stable", "refund": "Panel",
+      "verify": "Verification API (sp_code 1000)", "docs": "https://shurjopay.com.bd/developers",
+      "get": "Public sandbox user works immediately. Live: shurjoPay issues username, password and order prefix.",
+      "sandbox": "None needed", "test": "User sp_sandbox, password pyyk97hu&6u6, prefix NOK (shurjoPay developer page)",
+      "need": ["API username", "API password", "Order prefix"],
+      "demoNote": "Official shurjoPay sandbox user.",
+      "checkout": {"label": "Card, bank or wallet", "hint": "Cards, internet banking and mobile wallets, through shurjoPay", "label_bn": "কার্ড, ব্যাংক বা ওয়ালেট", "hint_bn": "কার্ড, ইন্টারনেট ব্যাংকিং ও মোবাইল ওয়ালেট (shurjoPay)"},
+      "f": [
+        {"k": "SHURJOPAY_USERNAME", "l": "Username", "t": "text", "req": 1, "demo": "sp_sandbox"},
+        {"k": "SHURJOPAY_PASSWORD", "l": "Password", "t": "secret", "req": 1, "demo": "pyyk97hu&6u6"},
+        {"k": "SHURJOPAY_PREFIX", "l": "Order prefix", "t": "text", "req": 1, "demo": "NOK"}
+      ]
+    },
+    {
+      "id": "eps", "name": "EPS", "kind": "Licensed PSO aggregator", "st": "beta", "refund": "Panel",
+      "verify": "HMAC-SHA512 + status API", "docs": "https://github.com/EPS-PG",
+      "get": "Open a sandbox account on the EPS merchant portal; it shows username, password, hash key, merchant ID and store ID.",
+      "sandbox": "EPS merchant portal", "test": "From the portal",
+      "need": ["Username (email)", "Password", "Hash key", "Merchant ID", "Store ID"],
+      "checkout": {"label": "Card, bank or wallet", "hint": "Cards, internet banking and mobile wallets, through EPS", "label_bn": "কার্ড, ব্যাংক বা ওয়ালেট", "hint_bn": "কার্ড, ইন্টারনেট ব্যাংকিং ও মোবাইল ওয়ালেট (EPS)"},
+      "f": [
+        {"k": "EPS_USERNAME", "l": "Username", "t": "text", "req": 1},
+        {"k": "EPS_PASSWORD", "l": "Password", "t": "secret", "req": 1},
+        {"k": "EPS_HASH_KEY", "l": "Hash key", "t": "secret", "req": 1},
+        {"k": "EPS_MERCHANT_ID", "l": "Merchant ID", "t": "text", "req": 1},
+        {"k": "EPS_STORE_ID", "l": "Store ID", "t": "text", "req": 1}
+      ]
+    },
+    {
+      "id": "portpos", "name": "PortPos", "kind": "Aggregator (ex-PortWallet)", "st": "beta", "refund": "Partial",
+      "verify": "Invoice retrieve + IPN", "docs": "https://github.com/PortWallet/php-sdk",
+      "get": "Generate an app key and secret key in the PortPos sandbox panel.",
+      "sandbox": "Sandbox panel", "test": "From the panel",
+      "need": ["App key", "Secret key"],
+      "ipn": true,
+      "checkout": {"label": "Card, bank or wallet", "hint": "Cards, internet banking and mobile wallets, through PortPos", "label_bn": "কার্ড, ব্যাংক বা ওয়ালেট", "hint_bn": "কার্ড, ইন্টারনেট ব্যাংকিং ও মোবাইল ওয়ালেট (PortPos)"},
+      "f": [
+        {"k": "PORTPOS_APP_KEY", "l": "App key", "t": "text", "req": 1},
+        {"k": "PORTPOS_SECRET_KEY", "l": "Secret key", "t": "secret", "req": 1}
+      ]
+    },
+    {
+      "id": "paystation", "name": "PayStation", "kind": "Aggregator", "st": "beta", "refund": "Panel",
+      "verify": "Transaction status API", "docs": "https://paystation.com.bd/documentation",
+      "get": "PayStation issues a merchant ID and password after sign-up.",
+      "sandbox": "On request", "test": "From PayStation",
+      "need": ["Merchant ID", "Password"],
+      "ipn": true,
+      "checkout": {"label": "Card, bank or wallet", "hint": "Cards, internet banking and mobile wallets, through PayStation", "label_bn": "কার্ড, ব্যাংক বা ওয়ালেট", "hint_bn": "কার্ড, ইন্টারনেট ব্যাংকিং ও মোবাইল ওয়ালেট (PayStation)"},
+      "f": [
+        {"k": "PAYSTATION_MERCHANT_ID", "l": "Merchant ID", "t": "text", "req": 1},
+        {"k": "PAYSTATION_PASSWORD", "l": "Password", "t": "secret", "req": 1},
+        {"k": "PAYSTATION_PAY_WITH_CHARGE", "l": "Customer pays the fee?", "t": "select", "opts": [["0", "No, merchant pays"], ["1", "Yes, add fee to customer"]], "val": "0"}
+      ]
+    },
+    {
+      "id": "upay", "name": "Upay", "kind": "Mobile wallet (UCB)", "st": "beta", "refund": "Full only",
+      "verify": "Single payment status API", "docs": "https://github.com/codeboxrcodehub/upay",
+      "get": "Only through Upay merchant onboarding, which provides the API PDF, base URL and credentials. Production accepts IPv4 only.",
+      "sandbox": "On request", "test": "From the onboarding pack",
+      "need": ["Base URL from the pack", "Merchant ID and merchant key", "Merchant code, name, mobile", "Merchant category code"],
+      "whitelist": true,
+      "checkout": {"label": "Upay", "hint": "Pay from your Upay wallet", "label_bn": "উপায়", "hint_bn": "আপনার উপায় ওয়ালেট থেকে পেমেন্ট করুন"},
+      "f": [
+        {"k": "UPAY_BASE_URL", "l": "Base URL", "t": "text", "req": 1, "url": true, "help": "Exactly as written in your Upay pack."},
+        {"k": "UPAY_MERCHANT_ID", "l": "Merchant ID", "t": "text", "req": 1},
+        {"k": "UPAY_MERCHANT_KEY", "l": "Merchant key", "t": "secret", "req": 1},
+        {"k": "UPAY_MERCHANT_CODE", "l": "Merchant code", "t": "text", "req": 1},
+        {"k": "UPAY_MERCHANT_NAME", "l": "Merchant name", "t": "text", "req": 1},
+        {"k": "UPAY_MERCHANT_MOBILE", "l": "Merchant mobile", "t": "text", "req": 1},
+        {"k": "UPAY_MERCHANT_CATEGORY_CODE", "l": "Merchant category code", "t": "text", "val": "5999"},
+        {"k": "UPAY_MERCHANT_CITY", "l": "Merchant city", "t": "text", "val": "Dhaka"}
+      ]
+    },
+    {
+      "id": "uddoktapay", "name": "UddoktaPay", "kind": "Self-hosted wallet automation", "st": "exp", "refund": "None",
+      "verify": "verify-payment API", "docs": "https://uddoktapay.readme.io/reference/create-charge",
+      "get": "Self-hosted panel; your own instance gives the base URL and API key.",
+      "sandbox": "None needed", "test": "API key 982d381360a69d419689740d9f2e26ce36fb7a50 at sandbox.uddoktapay.com",
+      "need": ["Your panel base URL", "API key", "Tick the compliance box"],
+      "demoNote": "UddoktaPay public sandbox.",
+      "ipn": true,
+      "checkout": {"label": "Mobile wallet transfer", "hint": "Send from your wallet and confirm, through UddoktaPay", "label_bn": "মোবাইল ওয়ালেট ট্রান্সফার", "hint_bn": "আপনার ওয়ালেট থেকে পাঠিয়ে নিশ্চিত করুন (UddoktaPay)"},
+      "f": [
+        {"k": "UDDOKTAPAY_BASE_URL", "l": "Panel base URL", "t": "text", "req": 1, "url": true, "demo": "https://sandbox.uddoktapay.com"},
+        {"k": "UDDOKTAPAY_API_KEY", "l": "API key", "t": "secret", "req": 1, "demo": "982d381360a69d419689740d9f2e26ce36fb7a50"},
+        {"k": "BDPAY_ALLOW_EXPERIMENTAL", "l": "I understand this tool verifies payments to wallet numbers, and that collecting business money into personal wallets breaks MFS terms and may need a Bangladesh Bank licence.", "t": "check", "req": 1}
+      ]
+    },
+    {
+      "id": "simulator", "name": "Simulator", "kind": "Built-in test gateway", "st": "stable", "refund": "Partial",
+      "verify": "Server-side lookup, like a real gateway", "docs": "",
+      "get": "Nothing to get. The simulator is a fake provider built into this service, so you can run the whole flow before any gateway has answered your application.",
+      "sandbox": "Built in", "test": "Approve, decline, cancel, pay the wrong amount, or lose the redirect on the simulator page",
+      "need": [],
+      "cloudOnly": true, "sandboxOnly": true,
+      "checkout": {"label": "Test payment", "hint": "Simulated gateway, no real money moves", "label_bn": "টেস্ট পেমেন্ট", "hint_bn": "পরীক্ষামূলক গেটওয়ে, কোনো আসল টাকা কাটা হবে না"},
+      "f": []
+    }
+  ],
+  "via": [
+    {"id": "rocket", "name": "Rocket (DBBL)", "via": "SSLCOMMERZ, shurjoPay, aamarPay, EPS, PortPos"},
+    {"id": "okwallet", "name": "OK Wallet", "via": "SSLCOMMERZ, shurjoPay, aamarPay"},
+    {"id": "cellfin", "name": "CellFin (IBBL)", "via": "SSLCOMMERZ, shurjoPay, EPS"},
+    {"id": "tap", "name": "Tap, mCash, SureCash", "via": "SSLCOMMERZ and other aggregators, where enabled"},
+    {"id": "cards", "name": "Visa, Mastercard, Amex", "via": "SSLCOMMERZ, EPS, PortPos, shurjoPay, aamarPay (hosted page, no card data on your server)"},
+    {"id": "ibank", "name": "Internet banking", "via": "SSLCOMMERZ, EPS, shurjoPay, aamarPay"},
+    {"id": "banglaqr", "name": "Bangla QR", "via": "Issued by your bank or MFS for shop counters; settlement shows in bank statements. No open e-commerce API.", "noApi": true},
+    {"id": "rails", "name": "NPSB, BEFTN, RTGS", "via": "Interbank rails, reached only through a bank corporate API agreement.", "noApi": true}
+  ]
+}

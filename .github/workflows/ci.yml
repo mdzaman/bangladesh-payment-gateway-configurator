@@ -1,0 +1,98 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The reference engine, exactly as its own spec asks for it to be tested.
+  core:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    defaults:
+      run: { working-directory: core }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "${{ matrix.python }}" }
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  cloud:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+        postgres: ["14", "18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}-alpine
+        env: { POSTGRES_USER: bdpay, POSTGRES_PASSWORD: bdpay, POSTGRES_DB: bdpay_cloud_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bdpay" --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      BDPAY_CLOUD_TEST_DATABASE_URL: postgresql+psycopg://bdpay:bdpay@127.0.0.1:5432/bdpay_cloud_test
+      BDPAY_CLOUD_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with: { python-version: "${{ matrix.python }}", enable-cache: true }
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json }
+      # The generator tests build real projects and run their test-suites with this Python.
+      - uses: astral-sh/setup-uv@v10.3.3
+        with: { python-version: "3.13", enable-cache: true }
+      - run: uv sync --frozen
+      - run: npm ci
+        working-directory: web
+      - run: npm run typecheck && npm run lint
+        working-directory: web
+      - run: npm test
+        working-directory: web
+        env: { BDPAY_PYTHON: "${{ github.workspace }}/.venv/bin/python" }
+      - run: npm run build
+        working-directory: web
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with: { context: ., push: false, tags: "bdpay-cloud:ci", cache-from: "type=gha", cache-to: "type=gha,mode=max" }
+      - name: Kubernetes manifests render
+        run: kubectl kustomize deploy/k8s/overlays/example > /dev/null
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      # The gitleaks command-line tool (MIT) rather than the separately licensed action,
+      # so the same check runs locally and in forks. See docs/development.md.
+      - name: gitleaks
+        run: >-
+          docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.30.1
+          git /repo --config /repo/.gitleaks.toml --redact --no-banner --verbose

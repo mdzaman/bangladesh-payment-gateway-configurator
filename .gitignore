@@ -1,0 +1,31 @@
+# secrets and local state
+.env
+.env.*
+!.env.example
+keys/
+*.pem
+*.sqlite3*
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# node
+node_modules/
+web/dist/
+web/src/generated/
+*.tsbuildinfo
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/
+
+# local tool state
+.claude/

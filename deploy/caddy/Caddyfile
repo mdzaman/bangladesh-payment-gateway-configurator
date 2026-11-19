@@ -1,0 +1,22 @@
+# Reverse proxy in front of the API.
+#
+#   BDPAY_SITE_ADDRESS=pay.example.com   real domain: Caddy gets and renews a
+#                                        Let's Encrypt certificate by itself
+#   BDPAY_SITE_ADDRESS=http://localhost  local trial, plain HTTP (the default)
+{$BDPAY_SITE_ADDRESS:http://localhost} {
+	encode zstd gzip
+	request_body {
+		max_size 512KB
+	}
+	reverse_proxy api:8000 {
+		health_uri /healthz
+		health_interval 10s
+	}
+	# The scrape endpoint is for the private network only.
+	@metrics path /metrics
+	respond @metrics 404
+	log {
+		output stdout
+		format json
+	}
+}

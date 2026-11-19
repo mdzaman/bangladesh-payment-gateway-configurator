@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bdpay-cloud
+data:
+  BDPAY_CLOUD_ENV: production
+  BDPAY_CLOUD_PUBLIC_URL: https://pay.example.com
+  BDPAY_CLOUD_LOG_FORMAT: json
+  BDPAY_CLOUD_LIVE_MODE: self_serve
+  BDPAY_CLOUD_ALLOW_SIGNUP: "true"
+  BDPAY_CLOUD_SIMULATOR: "true"
+  BDPAY_CLOUD_MAIL_BACKEND: smtp
+  BDPAY_CLOUD_MAIL_FROM: "bdpay cloud <no-reply@pay.example.com>"
+  BDPAY_CLOUD_SMTP_HOST: smtp.example.com
+  BDPAY_CLOUD_SMTP_PORT: "587"
+  BDPAY_CLOUD_SMTP_TLS: starttls
+  # The NAT gateway address(es) your pods leave the cluster from. Nagad and Upay whitelist it.
+  BDPAY_CLOUD_EGRESS_IPS: ""
+  BDPAY_CLOUD_BASE_URL_ALLOWLIST: ""
+  BDPAY_CLOUD_DB_POOL_SIZE: "10"
+  BDPAY_CLOUD_DB_MAX_OVERFLOW: "20"
+  BDPAY_CLOUD_THREADPOOL_SIZE: "64"

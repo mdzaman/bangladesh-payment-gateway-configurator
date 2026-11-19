@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ t('paid_title') }} · {{ brand }}{% endblock %}
+{% block head %}{% if target %}<meta http-equiv="refresh" content="4;url={{ target }}">{% endif %}{% endblock %}
+{% block body %}
+    <p class="tick" aria-hidden="true"></p>
+    <h1 class="title ok">{{ t('paid_title') }}</h1>
+    <p class="lead">{{ t('paid_body', amount=amount) }}</p>
+    <dl class="facts">
+      {% if session.reference %}<div><dt>{{ t('reference') }}</dt><dd>{{ session.reference }}</dd></div>{% endif %}
+      {% if session.paid_order_id %}<div><dt>{{ t('order') }}</dt><dd>{{ session.paid_order_id }}</dd></div>{% endif %}
+      <div><dt>{{ t('amount') }}</dt><dd>{{ amount }}</dd></div>
+    </dl>
+    {% if target %}
+    <p><a class="button" href="{{ target }}">{{ t('continue') }}</a></p>
+    <p class="fine">{{ t('redirecting') }}</p>
+    {% endif %}
+{% endblock %}

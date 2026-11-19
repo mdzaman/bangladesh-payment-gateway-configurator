@@ -1,0 +1,44 @@
+# Development dependencies only: PostgreSQL, Redis and a local mail catcher.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   make migrate && make dev
+#
+# Ports are deliberately unusual so they do not collide with databases you
+# already run on this machine.
+name: bdpay-cloud-dev
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: bdpay
+      POSTGRES_PASSWORD: bdpay
+      POSTGRES_DB: bdpay_cloud
+    ports: ["127.0.0.1:54329:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./deploy/postgres/dev-init.sql:/docker-entrypoint-initdb.d/10-dev-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bdpay -d bdpay_cloud"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["127.0.0.1:63790:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Catches every email the service sends. Inbox UI: http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    profiles: ["mail"]
+    ports: ["127.0.0.1:8025:8025", "127.0.0.1:1025:1025"]
+
+volumes:
+  pgdata: {}

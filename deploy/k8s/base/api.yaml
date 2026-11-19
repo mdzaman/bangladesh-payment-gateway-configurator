@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bdpay-cloud-api
+  labels: { app.kubernetes.io/component: api }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: bdpay-cloud-api }
+  template:
+    metadata:
+      labels: { app: bdpay-cloud-api, app.kubernetes.io/component: api }
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: bdpay-cloud-api }
+      initContainers:
+        # Every new pod makes sure the schema is current before it serves. The
+        # upgrade takes a database lock, so pods starting together do not collide.
+        - name: migrate
+          image: bdpay-cloud
+          args: ["migrate"]
+          envFrom: &env
+            - configMapRef: { name: bdpay-cloud }
+            - secretRef: { name: bdpay-cloud }
+          securityContext: &locked
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+      containers:
+        - name: api
+          image: bdpay-cloud
+          args: ["serve", "--host", "0.0.0.0", "--port", "8000", "--forwarded-allow-ips", "*"]
+          ports:
+            - { name: http, containerPort: 8000 }
+          envFrom: *env
+          securityContext: *locked
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+            failureThreshold: 4
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }   # let the load balancer stop sending first
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bdpay-cloud-api
+  labels: { app.kubernetes.io/component: api }
+spec:
+  selector: { app: bdpay-cloud-api }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: bdpay-cloud-api
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: bdpay-cloud-api }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bdpay-cloud-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: bdpay-cloud-api }

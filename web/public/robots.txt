@@ -1,0 +1,6 @@
+User-agent: *
+Disallow: /app/
+Disallow: /api/
+Disallow: /checkout/
+Disallow: /pay/
+Disallow: /p/

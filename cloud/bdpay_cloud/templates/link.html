@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ link.title }} · {{ brand }}{% endblock %}
+{% block body %}
+    <h1 class="title">{{ link.title }}</h1>
+    {% if link.description %}<p class="desc">{{ link.description }}</p>{% endif %}
+    {% if amount %}<p class="label">{{ t('amount_due') }}</p><p class="amount">{{ amount }}</p>{% endif %}
+
+    {% if error_text %}<p class="note bad" role="alert">{{ error_text }}</p>{% endif %}
+    {% if error %}<p class="note bad" role="alert">{{ t(error) }}</p>{% endif %}
+
+    {% if methods %}
+    <form method="post" action="/pay/{{ link.id }}">
+      {% if not amount %}
+      <label class="field" for="amount">{{ t('amount_label') }}<span class="help">{{ t('amount_between', low=low, high=high) }}</span></label>
+      <input id="amount" name="amount" inputmode="decimal" autocomplete="off" required value="{{ values.get('amount', '') }}">
+      {% endif %}
+      {% if 'name' in link.collect %}
+      <label class="field" for="name">{{ t('your_name') }}</label>
+      <input id="name" name="name" autocomplete="name" required maxlength="80" value="{{ values.get('name', '') }}">
+      {% endif %}
+      {% if 'phone' in link.collect %}
+      <label class="field" for="phone">{{ t('your_phone') }}</label>
+      <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" required maxlength="20" placeholder="01XXXXXXXXX" value="{{ values.get('phone', '') }}">
+      {% endif %}
+      {% if 'email' in link.collect %}
+      <label class="field" for="email">{{ t('your_email') }}</label>
+      <input id="email" name="email" type="email" autocomplete="email" required maxlength="200" value="{{ values.get('email', '') }}">
+      {% endif %}
+      <h2 class="step">{{ t('choose_method') }}</h2>
+      <div class="methods">
+        {% for m in methods %}
+        <button type="submit" name="gateway" value="{{ m.id }}" class="method">
+          <span class="method-name">{{ m.label }}</span>
+          {% if m.hint %}<span class="method-hint">{{ m.hint }}</span>{% endif %}
+        </button>
+        {% endfor %}
+      </div>
+    </form>
+    <p class="fine">{{ t('secure_note') }}</p>
+    {% else %}
+    <p class="note warn">{{ t('no_methods') }}</p>
+    {% endif %}
+{% endblock %}

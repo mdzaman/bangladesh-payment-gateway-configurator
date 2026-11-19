@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Simulator · {{ amount }}{% endblock %}
+{% block body %}
+    <p class="label">Simulated provider</p>
+    <p class="amount">{{ amount }}</p>
+    <p class="ref">Order <b>{{ row.order_ref }}</b> · payment <span class="mono">{{ row.id }}</span></p>
+    {% if dropped %}
+    <p class="note warn"><b>Paid, and the redirect was dropped on purpose.</b> The customer "closed the tab", so the shop was never told. Leave it: the reconcile worker asks the provider about pending orders and will mark this one paid within about two minutes. You can also press Requery on the order in the dashboard.</p>
+    {% elif done %}
+    <p class="note">This test payment has already been answered ({{ row.status }}). Start a new one from your shop or the dashboard.</p>
+    {% else %}
+    <p class="lead">This page stands in for a real provider such as bKash. Choose what the "customer" does. Whatever you pick, the service will not believe the redirect: it asks the provider what really happened.</p>
+    <form method="post" action="/simulator/{{ row.id }}" class="methods">
+      <button type="submit" name="action" value="approve" class="method primary">
+        <span class="method-name">Pay {{ amount }}</span>
+        <span class="method-hint">The normal case. The order becomes paid.</span>
+      </button>
+      <button type="submit" name="action" value="decline" class="method">
+        <span class="method-name">Decline</span>
+        <span class="method-hint">Wrong PIN or not enough balance. The order becomes failed.</span>
+      </button>
+      <button type="submit" name="action" value="cancel" class="method">
+        <span class="method-name">Cancel</span>
+        <span class="method-hint">The customer backs out. The order becomes cancelled.</span>
+      </button>
+      <button type="submit" name="action" value="wrong_amount" class="method">
+        <span class="method-name">Pay the wrong amount ({{ wrong }})</span>
+        <span class="method-hint">A tampered payment. The order must go to needs_review, never paid.</span>
+      </button>
+      <button type="submit" name="action" value="lost_redirect" class="method">
+        <span class="method-name">Pay, then lose the redirect</span>
+        <span class="method-hint">The customer pays and closes the tab. Reconcile must find it.</span>
+      </button>
+    </form>
+    {% endif %}
+{% endblock %}

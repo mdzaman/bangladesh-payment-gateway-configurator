@@ -1,0 +1,22 @@
+[project]
+name = "bdpay-service"
+version = "1.0.0"
+description = "One Python integration for Bangladeshi payment gateways (bKash, Nagad, SSLCOMMERZ, aamarPay, shurjoPay, EPS, PortPos, PayStation, Upay)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27", "fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"]
+
+[project.optional-dependencies]
+nagad = ["cryptography>=42"]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["bdpay", "bdpay.drivers"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

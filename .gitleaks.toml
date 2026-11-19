@@ -1,0 +1,29 @@
+# Secret scanning. Extends the default rules; the only exceptions are values
+# that are public on purpose.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Published sandbox credentials and test fixtures"
+regexes = [
+  # Sandbox values the providers (or the community, for bKash) publish for testing.
+  # They are documented in the build spec and refused by the service in live mode.
+  '''dbb74894e82415a2f7ff0ec3a97e4183''',                              # aamarPay public test store key
+  '''982d381360a69d419689740d9f2e26ce36fb7a50''',                      # UddoktaPay public sandbox key
+  '''4f6o0cjiki2rfm34kfdadl1eqq''',                                    # bKash community demo app key
+  '''2is7hdktrekvrbljjh44ll3d9l1dtjo4pasmjvs5vl5qr3fug4b''',           # bKash community demo app secret
+  '''sandboxTokenizedUser02''',
+  '''pyyk97hu&6u6''',                                                  # shurjoPay sandbox password
+  # The placeholder in documentation examples: literally "bdp_test_..." with three dots.
+  '''bdp_(test|live)_\.\.\.''',
+  # The development-only master key: published, and refused in production.
+  '''ZGV2LW9ubHktaW5zZWN1cmUta2V5LTAwMDAwMDAwMDA=''',
+]
+paths = [
+  '''cloud/tests/.*''',
+  '''core/tests/.*''',
+  '''web/src/lib/.*\.test\.ts''',
+  '''web/src/lib/testing\.ts''',
+  '''uv\.lock''',
+  '''web/package-lock\.json''',
+]

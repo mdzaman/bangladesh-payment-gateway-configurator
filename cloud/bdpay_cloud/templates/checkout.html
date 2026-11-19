@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ amount }} · {{ brand }}{% endblock %}
+{% block body %}
+    <p class="label">{{ t('amount_due') }}</p>
+    <p class="amount">{{ amount }}</p>
+    {% if session.description %}<p class="desc">{{ session.description }}</p>{% endif %}
+    {% if session.reference %}<p class="ref">{{ t('reference') }}: <b>{{ session.reference }}</b></p>{% endif %}
+
+    {% if error %}<p class="note bad" role="alert">{{ t(error) }}</p>{% endif %}
+    {% if note %}<p class="note {{ 'warn' if note in ('pending_note', 'review_note') else 'bad' }}" role="status">{{ t(note) }}{% if review and last_order %} <b>{{ last_order }}</b>{% endif %}</p>{% endif %}
+
+    {% if methods %}
+    <h1 class="step">{{ t('choose_method') }}</h1>
+    <form method="post" action="/checkout/{{ session.id }}/pay" class="methods">
+      {% for m in methods %}
+      <button type="submit" name="gateway" value="{{ m.id }}" class="method">
+        <span class="method-name">{{ m.label }}</span>
+        {% if m.hint %}<span class="method-hint">{{ m.hint }}</span>{% endif %}
+      </button>
+      {% endfor %}
+    </form>
+    <p class="fine">{{ t('secure_note') }}</p>
+    {% else %}
+    <p class="note warn">{{ t('no_methods') }}</p>
+    {% endif %}
+
+    <form method="post" action="/checkout/{{ session.id }}/cancel">
+      <button type="submit" class="link">{{ t('cancel') }}</button>
+    </form>
+{% endblock %}

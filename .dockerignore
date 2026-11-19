@@ -1,0 +1,19 @@
+.git
+.github
+.venv
+.env
+.env.*
+!.env.example
+.claude
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/node_modules
+web/dist
+web/src/generated
+cloud/tests
+# core/tests stays in: the dashboard build bundles it for the self-host generator
+docs
+deploy
+*.sqlite3*
+keys/

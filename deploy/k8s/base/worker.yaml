@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bdpay-cloud-worker
+  labels: { app.kubernetes.io/component: worker }
+spec:
+  # Any number can run side by side: each job claims its work with SKIP LOCKED.
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app: bdpay-cloud-worker }
+  template:
+    metadata:
+      labels: { app: bdpay-cloud-worker, app.kubernetes.io/component: worker }
+    spec:
+      automountServiceAccountToken: false
+      # A webhook attempt can take up to its timeout; let the current batch finish.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: bdpay-cloud
+          args: ["worker"]
+          envFrom:
+            - configMapRef: { name: bdpay-cloud }
+            - secretRef: { name: bdpay-cloud }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { memory: 384Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bdpay-cloud-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: bdpay-cloud-worker }

@@ -1,0 +1,29 @@
+# Only the ingress controller may reach the API. Outbound stays open: the
+# service has to reach the payment providers, your database and your SMTP host.
+# (Calls to private addresses on behalf of tenants are refused in the
+# application itself; see docs/security.md.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bdpay-cloud-api
+spec:
+  podSelector:
+    matchLabels: { app: bdpay-cloud-api }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+        - podSelector: {}          # same namespace: the metrics scraper
+      ports:
+        - { protocol: TCP, port: 8000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bdpay-cloud-worker
+spec:
+  podSelector:
+    matchLabels: { app: bdpay-cloud-worker }
+  policyTypes: [Ingress]
+  ingress: []                      # nothing connects to a worker

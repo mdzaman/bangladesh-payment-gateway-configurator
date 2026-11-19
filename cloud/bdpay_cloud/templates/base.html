@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>{% block title %}{{ brand }}{% endblock %}</title>
+{% block head %}{% endblock %}
+<link rel="stylesheet" href="/static/hosted.css">
+</head>
+<body>
+{% if sandbox %}<p class="ribbon" role="status">{{ t('test_mode') }}</p>{% endif %}
+<main class="page">
+  <header class="merchant">
+    <span class="mark" aria-hidden="true"></span>
+    <span class="merchant-name">{{ brand }}</span>
+  </header>
+  <section class="card">
+{% block body %}{% endblock %}
+  </section>
+  <footer class="foot">
+    {% if support_email or support_phone %}
+    <p>{{ t('support') }}{% if support_phone %} · <a href="tel:{{ support_phone }}">{{ support_phone }}</a>{% endif %}{% if support_email %} · <a href="mailto:{{ support_email }}">{{ support_email }}</a>{% endif %}</p>
+    {% endif %}
+    <p><span class="lock" aria-hidden="true"></span>{{ t('powered') }} · <a href="{{ switch_url }}" hreflang="{{ 'en' if lang == 'bn' else 'bn' }}">{{ t('switch_lang') }}</a></p>
+  </footer>
+</main>
+</body>
+</html>
