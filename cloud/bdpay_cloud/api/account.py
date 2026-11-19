@@ -13,6 +13,7 @@ from ..db import session_scope, utcnow
 from ..engine.orders import iso
 from ..engine.runtime import Runtime
 from ..models import Invitation, Membership, User, UserSession, Workspace
+from ..security import totp
 from ..services import audit, auth, mailer, workspaces
 from ..settings import Settings
 from .deps import UserCtx, WsCtx, client_ip, current_user, get_rt, rate_limit, workspace_ctx
@@ -28,6 +29,10 @@ from .schemas import (
     RoleIn,
     SignupIn,
     TokenIn,
+    TwoFactorChangeIn,
+    TwoFactorConfirmIn,
+    TwoFactorLoginIn,
+    TwoFactorSetupIn,
     WorkspaceIn,
     WorkspacePatch,
 )
@@ -50,8 +55,19 @@ def user_json(u: User) -> dict[str, Any]:
         "email": u.email,
         "name": u.name,
         "email_verified": u.email_verified_at is not None,
+        "two_factor_enabled": u.totp_enabled_at is not None,
         "is_platform_admin": u.is_platform_admin,
         "created_at": iso(u.created_at),
+    }
+
+
+def two_factor_json(db, u: User) -> dict[str, Any]:
+    enabled = u.totp_enabled_at is not None
+    return {
+        "enabled": enabled,
+        "enabled_at": iso(u.totp_enabled_at),
+        "setup_pending": auth.setup_pending(u),
+        "recovery_codes_left": auth.recovery_codes_left(db, u.id) if enabled else 0,
     }
 
 
@@ -163,11 +179,50 @@ def login(body: LoginIn, request: Request, response: Response, rt: Runtime = Dep
     rate_limit(request, "login_ip", ip, rt.settings.login_rate_per_15min * 3, 900)
     rate_limit(request, "login_email", email, rt.settings.login_rate_per_15min, 900)
     with session_scope(rt.sessions) as db:
-        user, session, token = auth.login(
+        res = auth.login(
             db, rt.settings, email=email, password=body.password, ip=ip, user_agent=request.headers.get("user-agent")
         )
-        payload = me_payload(db, rt, user, session.csrf_token)
-    _set_cookie(response, rt.settings, token)
+        if res.session is None:
+            # Two-factor account: the password was right, but there is no session
+            # and no cookie until /auth/login/two-factor gets a code as well.
+            return {
+                "two_factor_required": True,
+                "challenge": res.challenge,
+                "expires_in": auth.CHALLENGE_MINUTES * 60,
+            }
+        payload = me_payload(db, rt, res.user, res.session.csrf_token)
+    _set_cookie(response, rt.settings, res.token)
+    return payload
+
+
+@router.post("/auth/login/two-factor")
+def login_two_factor(body: TwoFactorLoginIn, request: Request, response: Response, rt: Runtime = Depends(get_rt)):
+    ip = client_ip(request)
+    rate_limit(request, "login_code_ip", ip, rt.settings.login_rate_per_15min * 3, 900)
+    with session_scope(rt.sessions) as db:
+        email = auth.challenge_account(db, body.challenge)
+        if email:
+            # Per account, a code is one more sign-in attempt: it draws on the budget of the password step.
+            rate_limit(request, "login_email", email, rt.settings.login_rate_per_15min, 900)
+        res = auth.complete_login(
+            db,
+            rt.settings,
+            rt.vault,
+            challenge=body.challenge,
+            code=body.code,
+            recovery_code=body.recovery_code,
+            ip=ip,
+            user_agent=request.headers.get("user-agent"),
+        )
+        if res.method == "recovery_code":
+            audit.record(
+                db,
+                Actor("user", res.user.id, res.user.email, ip),
+                "user.recovery_code_used",
+                detail={"remaining": auth.recovery_codes_left(db, res.user.id)},
+            )
+        payload = me_payload(db, rt, res.user, res.session.csrf_token)
+    _set_cookie(response, rt.settings, res.token)
     return payload
 
 
@@ -236,6 +291,88 @@ def change_password(body: ChangePasswordIn, user: UserCtx = Depends(current_user
         )
         audit.record(db, user.actor, "user.password_changed")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- two-factor
+def _two_factor_limit(request: Request, user: UserCtx) -> None:
+    # These take a password or a code from someone already signed in. The account
+    # lock-out is the real limit on guessing; this keeps a script from even getting there fast.
+    rate_limit(request, "two_factor", user.user.id, 20, 900)
+
+
+@router.get("/auth/two-factor")
+def two_factor_status(user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)):
+    with session_scope(rt.sessions) as db:
+        return two_factor_json(db, db.get(User, user.user.id))
+
+
+@router.post("/auth/two-factor/setup")
+def two_factor_setup(
+    body: TwoFactorSetupIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    """Start a set-up. The secret is in this response and in no other."""
+    _two_factor_limit(request, user)
+    with session_scope(rt.sessions) as db:
+        setup = auth.begin_two_factor(db, rt.vault, rt.settings, user.user.id, body.current_password)
+    return {
+        "secret": setup.secret,
+        "otpauth_uri": setup.uri,
+        "account": user.user.email,
+        "issuer": rt.settings.brand_name,
+        "digits": totp.DIGITS,
+        "period": totp.PERIOD,
+        "expires_in": auth.TOTP_SETUP_MINUTES * 60,
+    }
+
+
+@router.post("/auth/two-factor/confirm")
+def two_factor_confirm(
+    body: TwoFactorConfirmIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    """Switch it on with the first code. The recovery codes are in this response and in no other."""
+    _two_factor_limit(request, user)
+    with session_scope(rt.sessions) as db:
+        codes = auth.confirm_two_factor(db, rt.vault, user.user.id, body.code, keep_session=user.session_id)
+        audit.record(db, user.actor, "user.two_factor_enabled")
+    return {"enabled": True, "recovery_codes": codes}
+
+
+@router.post("/auth/two-factor/disable")
+def two_factor_disable(
+    body: TwoFactorChangeIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    _two_factor_limit(request, user)
+    with session_scope(rt.sessions) as db:
+        auth.disable_two_factor(
+            db,
+            rt.vault,
+            user.user.id,
+            password=body.current_password,
+            code=body.code,
+            recovery_code=body.recovery_code,
+            keep_session=user.session_id,
+        )
+        audit.record(db, user.actor, "user.two_factor_disabled")
+    return {"enabled": False}
+
+
+@router.post("/auth/two-factor/recovery-codes")
+def two_factor_recovery_codes(
+    body: TwoFactorChangeIn, request: Request, user: UserCtx = Depends(current_user), rt: Runtime = Depends(get_rt)
+):
+    """Replace the recovery codes. The new ones are in this response and in no other."""
+    _two_factor_limit(request, user)
+    with session_scope(rt.sessions) as db:
+        codes = auth.regenerate_recovery_codes(
+            db,
+            rt.vault,
+            user.user.id,
+            password=body.current_password,
+            code=body.code,
+            recovery_code=body.recovery_code,
+        )
+        audit.record(db, user.actor, "user.recovery_codes_regenerated")
+    return {"recovery_codes": codes}
 
 
 @router.get("/auth/sessions")

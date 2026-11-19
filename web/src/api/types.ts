@@ -12,6 +12,7 @@ export interface User {
   email: string;
   name: string;
   email_verified: boolean;
+  two_factor_enabled: boolean;
   is_platform_admin: boolean;
   created_at: string;
 }
@@ -36,6 +37,35 @@ export interface Me {
   user: User;
   csrf_token: string;
   workspaces: Workspace[];
+}
+
+// --------------------------------------------------------------- two-factor
+/** What sign-in answers for an account with two-factor on: no session yet, a second step to finish. */
+export interface TwoFactorChallenge {
+  two_factor_required: true;
+  challenge: string;
+  expires_in: number;
+}
+
+/** One of the two: the 6-digit code from the authenticator app, or a single-use recovery code. */
+export type SecondFactor = { code: string } | { recovery_code: string };
+
+export interface TwoFactorStatus {
+  enabled: boolean;
+  enabled_at: string | null;
+  setup_pending: boolean;
+  recovery_codes_left: number;
+}
+
+/** Shown once, when a set-up starts. `otpauth_uri` is what the QR code carries. */
+export interface TwoFactorSetup {
+  secret: string;
+  otpauth_uri: string;
+  account: string;
+  issuer: string;
+  digits: number;
+  period: number;
+  expires_in: number;
 }
 
 export interface Platform {

@@ -63,9 +63,12 @@ class Dash:
         self.csrf = ""
         self.me: dict = {}
         self.email = ""
+        self.challenge = ""  # from a sign-in that still owes the second factor
 
     def _remember(self, r):
-        if r.status_code == 200:
+        if r.status_code == 200 and r.json().get("two_factor_required"):
+            self.challenge = r.json()["challenge"]
+        elif r.status_code == 200:
             self.me = r.json()
             self.csrf = self.me["csrf_token"]
         return r
@@ -88,6 +91,19 @@ class Dash:
     def login(self, email: str, password: str = PASSWORD):
         self.email = email
         return self._remember(self.c.post("/api/auth/login", json={"email": email, "password": password}))
+
+    def second_step(self, **factor):
+        """Finish a two-factor sign-in: ``code="123456"`` or ``recovery_code="abcde-12345"``."""
+        return self._remember(self.c.post("/api/auth/login/two-factor", json={"challenge": self.challenge, **factor}))
+
+    def enable_two_factor(self, clock) -> tuple[str, list[str]]:
+        """Set up and confirm two-factor sign-in. Returns the secret and the recovery codes."""
+        setup = self.post("/api/auth/two-factor/setup", {"current_password": PASSWORD})
+        assert setup.status_code == 200, setup.text
+        secret = setup.json()["secret"]
+        done = self.post("/api/auth/two-factor/confirm", {"code": clock.code(secret)})
+        assert done.status_code == 200, done.text
+        return secret, done.json()["recovery_codes"]
 
     def request(self, method: str, path: str, **kw):
         headers = {"X-CSRF-Token": self.csrf, **kw.pop("headers", {})}
@@ -138,6 +154,30 @@ class Dash:
 
 def bearer(key: str) -> dict:
     return {"Authorization": f"Bearer {key}"}
+
+
+def run_cli(monkeypatch, capsys, *argv, keys: str | None = None, **env):
+    """Run ``bdpay-cloud <argv>`` against the test database. Returns (exit code, stdout, stderr)."""
+    from bdpay_cloud import cli
+    from bdpay_cloud import settings as settings_module
+
+    from conftest import TEST_DB, TEST_KEYS
+
+    settings_module.get_settings.cache_clear()
+    for k, v in {
+        "ENV": "test",
+        "DATABASE_URL": TEST_DB,
+        "MASTER_KEYS": keys or TEST_KEYS,
+        "PUBLIC_URL": "https://pay.test",
+        "LOG_FORMAT": "text",
+        **env,
+    }.items():
+        monkeypatch.setenv(f"BDPAY_CLOUD_{k}", v)
+    monkeypatch.chdir("/")  # no stray .env file
+    code = cli.main(list(argv))
+    settings_module.get_settings.cache_clear()
+    out = capsys.readouterr()
+    return code, out.out, out.err
 
 
 def last_email(rt: Runtime, to: str) -> dict | None:

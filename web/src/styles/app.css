@@ -186,6 +186,19 @@ pre.code {
 .secret-once { background: var(--amber-soft); border: 1px dashed var(--amber); border-radius: 10px; padding: 12px 14px; }
 .secret-once code { display: block; font-size: 14px; margin: 6px 0; user-select: all; }
 
+/* --------------------------------------------------------------- two-factor */
+/* One-time codes and recovery codes: monospaced and spaced out, so a digit is not misread. */
+input.otp { font: 500 20px/1.3 var(--font-mono); letter-spacing: 0.16em; max-width: 260px; }
+input.otp::placeholder { letter-spacing: 0.16em; }
+.setup-steps { margin: 0; padding-left: 22px; display: grid; gap: 18px; }
+.setup-steps > li::marker { font-weight: 700; color: var(--green2); }
+.setup-scan { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; margin-top: 12px; }
+.setup-scan > div { flex: 1; min-width: 220px; }
+/* Fixed black on white, not the theme's colours: a phone camera needs the contrast. */
+.qr { width: 196px; height: 196px; flex: none; border-radius: 10px; border: 1px solid var(--line); background: #fff; }
+.setup-key { display: block; font-size: 15px; line-height: 1.7; letter-spacing: 0.06em; user-select: all; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+.codes { list-style: none; margin: 10px 0 12px; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 0 16px; }
+
 /* ---------------------------------------------------------------- app shell */
 .shell { display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); min-height: 100vh; }
 .side {
