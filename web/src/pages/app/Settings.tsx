@@ -93,7 +93,7 @@ export default function Settings() {
         <h2>Sign-in security</h2>
         <label className="check">
           <input type="checkbox" checked={ws.require_two_factor} onChange={(e) => requireTwoFactor.mutate(e.target.checked)}
-            disabled={!ctx.isOwner || requireTwoFactor.isPending || (!ws.require_two_factor && !ownTwoFactor)} />
+            disabled={!ctx.isOwner || requireTwoFactor.isPending || !ownTwoFactor} />
           <span>
             Require two-factor sign-in for changes in live mode
             <span className="help">
@@ -103,8 +103,10 @@ export default function Settings() {
           </span>
         </label>
         {!ctx.isOwner ? <p className="small mute" style={{ marginBottom: 0 }}>Only an owner can change this.</p>
-          : !ownTwoFactor && !ws.require_two_factor && (
-            <p className="small" style={{ marginBottom: 0 }}>Turn it on for <Link to="/account#two-factor">your own account</Link> first.</p>
+          : !ownTwoFactor && (
+            <p className="small" style={{ marginBottom: 0 }}>
+              To change this, turn it on for <Link to="/account#two-factor">your own account</Link> first.
+            </p>
           )}
         <FormError error={requireTwoFactor.error} />
       </section>

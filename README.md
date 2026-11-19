@@ -165,7 +165,7 @@ make lint
 | Suite | What it proves |
 |---|---|
 | `core/tests` (35) | The reference engine, against a fake of every gateway. |
-| `cloud/tests` (262) | The service against a real PostgreSQL (14 and 18). Includes the 35 reference tests re-run on the multi-tenant engine, a byte-for-byte check of `core/` against the build spec, tenant isolation object by object, races (one provider session under concurrent starts, one event under concurrent callbacks, one session for one sign-in code, every one of several wrong passwords sent at once counted), SSRF, key rotation, two-factor sign-in. |
+| `cloud/tests` (266) | The service against a real PostgreSQL (14 and 18). Includes the 35 reference tests re-run on the multi-tenant engine, a byte-for-byte check of `core/` against the build spec, tenant isolation object by object, races (one provider session under concurrent starts, one event under concurrent callbacks, one session for one sign-in code, every one of several wrong passwords sent at once counted), SSRF, key rotation, two-factor sign-in. |
 | `web` (56) | The generator: twelve generated projects are written to disk and each one's own test-suite is run. The in-browser QR encoder, against values from the standard. |
 
 ## Compliance

@@ -249,7 +249,7 @@ def cmd_rotate_keys(_args) -> int:
             if v:
                 conn.execute(text("UPDATE webhook_endpoints SET secret_enc = :v WHERE id = :id"), {"v": v, "id": r.id})
         for r in conn.execute(
-            text("SELECT id, totp_secret_enc FROM users WHERE totp_secret_enc IS NOT NULL FOR UPDATE")
+            text("SELECT id, totp_secret_enc FROM users WHERE totp_secret_enc IS NOT NULL FOR NO KEY UPDATE")
         ).all():
             v = rotate(r.totp_secret_enc, aad_totp(r.id), f"two-factor secret of {r.id}", "two-factor secret(s)")
             if v:
@@ -328,7 +328,7 @@ def cmd_disable_two_factor(args) -> int:
     email = args.email.strip().lower()
     try:
         with session_scope(rt.sessions) as db:
-            user = db.scalar(select(User).where(User.email == email).with_for_update())
+            user = db.scalar(select(User).where(User.email == email).with_for_update(**auth.ACCOUNT_LOCK))
             if user is None:
                 print("✗ no account with this email", file=sys.stderr)
                 return 1

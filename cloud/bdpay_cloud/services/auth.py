@@ -113,11 +113,25 @@ def logout(db: Session, token: str) -> None:
         session.revoked_at = utcnow()
 
 
+# How an account row is locked (FOR NO KEY UPDATE): against every other change to
+# the same account, but not against rows that merely refer to it. A new session
+# or a new emailed link only needs the account to go on existing. The stronger
+# FOR UPDATE would make those wait as well, and a password reset would then
+# deadlock with a second "forgot password" for the same account.
+ACCOUNT_LOCK = {"key_share": True}
+
+
+def lock_account(db: Session, user_id: str) -> User | None:
+    """The account row, locked for this transaction and freshly read. Everything
+    that changes how an account signs in takes this first, then the account's
+    sessions, then its sign-in challenges: one order, so such requests wait for
+    each other instead of deadlocking."""
+    return db.get(User, user_id, with_for_update=ACCOUNT_LOCK, populate_existing=True)
+
+
 def revoke_sessions(db: Session, user_id: str, keep: str | None = None) -> None:
-    # The account row first, as in everything else that changes how an account
-    # signs in: requests for one account then take their locks in one order
-    # (account, sessions, challenges) and wait for each other instead of deadlocking.
-    db.execute(select(User.id).where(User.id == user_id).with_for_update())
+    # The account row first (see lock_account), whether or not the caller holds it already.
+    db.execute(select(User.id).where(User.id == user_id).with_for_update(**ACCOUNT_LOCK))
     q = update(UserSession).where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
     if keep:
         q = q.where(UserSession.id != keep)
@@ -308,9 +322,13 @@ def login(
     # Checking a password is slow on purpose, and the row was not locked for it.
     # Take the row now and look again: guesses sent at the same moment may have
     # locked the account, or the password may have been changed, in the meantime.
-    user = db.get(User, user.id, with_for_update=True, populate_existing=True)
+    user = lock_account(db, user.id)
     now = utcnow()
-    if user is None or user.password_hash != checked:
+    if user is None:
+        raise BAD_LOGIN
+    # A different hash is a new password, or the same password re-hashed by a
+    # sign-in that finished a moment earlier. Only the first is a reason to refuse.
+    if user.password_hash != checked and not passwords.verify_password(user.password_hash, password):
         raise BAD_LOGIN
     _refuse_if_locked(user, now)
     if user.disabled_at is not None:
@@ -346,7 +364,7 @@ def complete_login(
     # after it, so two requests carrying the same code cannot both get a session.
     challenge_id = sha256_hex(challenge or "")
     user_id = db.scalar(select(LoginChallenge.user_id).where(LoginChallenge.id == challenge_id))
-    user = db.get(User, user_id, with_for_update=True, populate_existing=True) if user_id else None
+    user = lock_account(db, user_id) if user_id else None
     row = db.get(LoginChallenge, challenge_id, with_for_update=True, populate_existing=True) if user else None
     now = utcnow()
     if user is None or row is None or row.used_at is not None or row.expires_at <= now:

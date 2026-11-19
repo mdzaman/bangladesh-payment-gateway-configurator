@@ -274,7 +274,7 @@ def reset_password(body: ResetIn, request: Request, rt: Runtime = Depends(get_rt
 def _own_account(db, user: UserCtx, request: Request) -> User:
     """This person's row, locked, for a change that asks for their password or a code again."""
     rate_limit(request, "reauth", user.user.id, REAUTH_TRIES, 900)
-    return db.get(User, user.user.id, with_for_update=True, populate_existing=True)
+    return auth.lock_account(db, user.user.id)
 
 
 @router.post("/auth/change-password")
@@ -450,10 +450,12 @@ def update_workspace(body: WorkspacePatch, ctx: WsCtx = Depends(workspace_ctx), 
     ctx.need("admin")
     changes = body.model_dump(exclude_unset=True)
     if "require_two_factor" in changes:
-        # Whether the team needs a second factor is for owners to decide, and an
-        # owner cannot ask of others what their own account does not do.
+        # Whether the team needs a second factor is for owners to decide, and only
+        # for an owner whose own account has one. That goes for switching the rule
+        # off as much as on: an owner signed in with a password alone must not be
+        # able to take it away.
         ctx.need("owner")
-        if changes["require_two_factor"] and ctx.user.user.totp_enabled_at is None:
+        if ctx.user.user.totp_enabled_at is None:
             raise ApiError(400, "VALIDATION", "Turn on two-factor sign-in for your own account first")
     with session_scope(rt.sessions) as db:
         ws = db.get(Workspace, ctx.workspace.id, with_for_update=True)

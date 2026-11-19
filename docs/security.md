@@ -155,6 +155,15 @@ digits, 30 seconds). Owners can require it of anyone who changes things in live 
 * **The secret** is encrypted at rest like gateway credentials, bound to the account
   (`totp:<user>`), and shown only during set-up. The QR code is drawn in the browser:
   the secret is never sent to a QR service or any other third party.
+* **The workspace rule.** When an owner requires two-factor sign-in, a member without
+  it can look at live mode but cannot change it: gateways, API keys, webhooks, payment
+  links, orders and refunds, and the live environment's settings. Only an owner whose
+  own account has a second factor can switch the rule on or off, so an owner signed in
+  with a password alone cannot take it away. The rule does not cover team changes, the
+  workspace's own details or archiving. And it cannot protect an account that has no
+  second factor yet from someone who knows its password: the password is all it takes
+  to set one up, though the account holder is emailed when that happens. What the rule
+  ensures is that everyone who changes live things has one.
 * **Locked out** (phone and recovery codes both gone): the operator runs
   `bdpay-cloud disable-two-factor --email <address>` after checking who is asking. That
   is written to the audit log and the account holder is emailed.

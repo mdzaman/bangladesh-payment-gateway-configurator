@@ -8,11 +8,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from argon2 import PasswordHasher
 from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from bdpay_cloud import migrate
 from bdpay_cloud.crypto import Vault, aad_totp
-from bdpay_cloud.db import utcnow
+from bdpay_cloud.db import session_scope, utcnow
 from bdpay_cloud.models import User
 from bdpay_cloud.security import passwords, totp
 from bdpay_cloud.services import auth
@@ -407,6 +409,98 @@ def test_a_right_password_is_checked_again_after_the_slow_part(dash, new_client,
     assert c.get("/api/auth/me").status_code == 401
 
 
+def test_two_right_sign_ins_while_the_password_is_being_re_hashed(dash, new_client, rt, monkeypatch):
+    # The stored hash was made with older settings, so the next sign-in re-hashes it.
+    old = PasswordHasher(time_cost=2, memory_cost=8, parallelism=1).hash(PASSWORD)
+    with rt.engine.begin() as conn:
+        conn.execute(text("UPDATE users SET password_hash = :h WHERE email = :e"), {"h": old, "e": dash.email})
+    assert passwords.needs_rehash(old)
+    both_checked = threading.Barrier(2, timeout=5)
+    real = passwords.verify_password
+
+    def verify_then_meet(stored, given):
+        ok = real(stored, given)
+        if ok and stored == old:
+            both_checked.wait()  # both have checked the password before either takes the account row
+        return ok
+
+    monkeypatch.setattr(passwords, "verify_password", verify_then_meet)
+
+    def sign_in(c):
+        return c.post("/api/auth/login", json={"email": dash.email, "password": PASSWORD}).status_code
+
+    with ThreadPoolExecutor(2) as pool:
+        statuses = list(pool.map(sign_in, [new_client(), new_client()]))
+    # The second finds a different hash from the one it checked. It is the same password: both are let in.
+    assert statuses == [200, 200]
+    assert not passwords.needs_rehash(user_row(rt, dash.email).password_hash)
+
+
+def test_holding_an_account_does_not_hold_up_what_only_refers_to_it(dash, rt):
+    """Sign-in, the account page and a password reset lock the account row. A new
+    emailed link or a new session for that account only refers to the row, and
+    must not have to wait for it."""
+    uid = dash.me["user"]["id"]
+    # What sign-in and the account page take, then what a password reset takes.
+    for take in (auth.lock_account, auth.revoke_sessions):
+        holder = rt.sessions()
+        try:
+            take(holder, uid)
+            with rt.engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '2s'"))
+                conn.execute(
+                    text(
+                        "INSERT INTO email_tokens (id, user_id, purpose, expires_at) "
+                        "VALUES (:i, :u, 'verify_email', now())"
+                    ),
+                    {"i": "probe-" + uuid.uuid4().hex, "u": uid},
+                )
+            # Another change to the same account still waits its turn.
+            with pytest.raises(OperationalError), rt.engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '200ms'"))
+                conn.execute(text("UPDATE users SET name = name WHERE id = :u"), {"u": uid})
+        finally:
+            holder.rollback()
+            holder.close()
+    assert dash.get("/api/auth/me").status_code == 200  # the holders rolled back: nothing was revoked
+
+
+def test_a_reset_and_another_forgot_password_at_the_same_moment(dash, rt):
+    with session_scope(rt.sessions) as db:
+        auth.request_password_reset(db, rt.settings, dash.email)
+    token = token_from(last_email(rt, dash.email))
+    reset_has_the_account, forgot_has_the_link = threading.Event(), threading.Event()
+    outcome: dict[str, str] = {}
+
+    def use_the_link():
+        try:
+            with session_scope(rt.sessions) as db:
+                auth.reset_password(db, token, "a brand new long password")  # takes the account row
+                reset_has_the_account.set()
+                forgot_has_the_link.wait(5)
+                time.sleep(0.4)  # the other request reaches its commit
+            outcome["reset"] = "committed"  # leaving the block writes used_at on the link
+        except DBAPIError as e:
+            outcome["reset"] = type(e.orig).__name__
+
+    def ask_for_another():
+        try:
+            reset_has_the_account.wait(5)
+            with session_scope(rt.sessions) as db:
+                auth.request_password_reset(db, rt.settings, dash.email)  # marks the open link used: locks its row
+                forgot_has_the_link.set()
+            outcome["forgot"] = "committed"  # leaving the block inserts the new link, which refers to the account
+        except DBAPIError as e:
+            outcome["forgot"] = type(e.orig).__name__
+
+    threads = [threading.Thread(target=use_the_link), threading.Thread(target=ask_for_another)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    assert outcome == {"reset": "committed", "forgot": "committed"}
+
+
 def test_wrong_guesses_on_the_account_page_count_towards_the_lock(dash, new_client, app, rt, clock):
     """A session someone else got hold of is not a free place to guess the password or a code."""
     setup, enable = "/api/auth/two-factor/setup", "/api/auth/two-factor/enable"
@@ -791,3 +885,30 @@ def test_workspace_can_require_two_factor_for_live_changes(dash, new_client, rt,
             .all()
         )
     assert fields[:2] == [["require_two_factor"], ["require_two_factor"]]
+
+
+def test_an_owner_without_the_factor_cannot_take_the_workspace_rule_away(dash, new_client, rt, clock):
+    dash.go_live()
+    base = f"/api/workspaces/{dash.slug}"
+    enrol(dash)
+    assert dash.patch(base, {"require_two_factor": True}).status_code == 200
+    # A second owner who never set one up. Their password alone must not be enough to drop the rule.
+    dash.post(f"{base}/invitations", {"email": "owner.two@example.com", "role": "owner"})
+    second = Dash(new_client())
+    r = second.signup(email="owner.two@example.com", invite_token=token_from(last_email(rt, "owner.two@example.com")))
+    assert r.status_code == 200 and second.me["user"]["two_factor_enabled"] is False
+
+    def live_change():
+        return second.patch(f"{second.env('live')}/settings", {"result_url": "https://shop.example/thanks"})
+
+    assert live_change().json()["detail"]["code"] == "TWO_FACTOR_REQUIRED"
+    for wanted in (False, True):
+        r = second.patch(base, {"require_two_factor": wanted})
+        assert r.status_code == 400 and "your own account first" in r.json()["detail"]["message"], wanted
+    assert dash.get(base).json()["require_two_factor"] is True
+    assert live_change().status_code == 403
+    assert second.patch(base, {"display_name": "Rahim Store"}).status_code == 200  # other settings are not held back
+    # Once their own account has a second factor, the decision is theirs as well.
+    enrol(second)
+    assert second.patch(base, {"require_two_factor": False}).json()["require_two_factor"] is False
+    assert live_change().status_code == 200
