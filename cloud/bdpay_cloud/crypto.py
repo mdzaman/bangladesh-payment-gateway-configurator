@@ -1,9 +1,10 @@
-"""Encryption of tenant secrets at rest.
+"""Encryption of secrets at rest.
 
-Gateway credentials, callback signing secrets, webhook secrets and cached
-provider tokens are stored as AES-256-GCM ciphertext. Keys come from a key
-ring in ``BDPAY_CLOUD_MASTER_KEYS``: the first key encrypts, every key can
-decrypt, which is what makes rotation possible without downtime.
+Gateway credentials, callback signing secrets, webhook secrets, cached
+provider tokens and the two-factor secrets of dashboard users are stored as
+AES-256-GCM ciphertext. Keys come from a key ring in
+``BDPAY_CLOUD_MASTER_KEYS``: the first key encrypts, every key can decrypt,
+which is what makes rotation possible without downtime.
 
 Every ciphertext is bound to where it lives through the AEAD associated data
 (for example ``gateway:<workspace>:<mode>:<gateway>``). A ciphertext copied
@@ -143,3 +144,7 @@ def aad_webhook_secret(endpoint_id: str) -> str:
 
 def aad_provider_token(key: str) -> str:
     return f"provider-token:{key}"
+
+
+def aad_totp(user_id: str) -> str:
+    return f"totp:{user_id}"

@@ -50,6 +50,30 @@ class ProfileIn(Body):
     name: str = Field(min_length=1, max_length=80)
 
 
+class TwoFactorLoginIn(Body):
+    """Second step of signing in: the challenge from the first, plus one of the two."""
+
+    challenge: str = Field(min_length=1, max_length=200)
+    code: str | None = Field(default=None, max_length=40)
+    recovery_code: str | None = Field(default=None, max_length=40)
+
+
+class TwoFactorSetupIn(Body):
+    current_password: str = Field(max_length=200)
+
+
+class TwoFactorConfirmIn(Body):
+    code: str = Field(min_length=1, max_length=40)
+
+
+class TwoFactorChangeIn(Body):
+    """Switching it off, or replacing the recovery codes: the password plus one of the two."""
+
+    current_password: str = Field(max_length=200)
+    code: str | None = Field(default=None, max_length=40)
+    recovery_code: str | None = Field(default=None, max_length=40)
+
+
 # ----------------------------------------------------------------- workspaces
 class WorkspaceIn(Body):
     name: str = Field(min_length=2, max_length=80)

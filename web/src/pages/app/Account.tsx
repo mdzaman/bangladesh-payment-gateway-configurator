@@ -5,6 +5,7 @@ import * as api from "../../api/endpoints";
 import { useSession } from "../../lib/session";
 import { Brand } from "../../layout/Shell";
 import { ErrorNote, FormError, Loading, PageHead, Pill, TextField, Time, useToast } from "../../ui";
+import TwoFactor from "./TwoFactor";
 
 export default function Account() {
   const { me, refresh } = useSession();
@@ -53,6 +54,8 @@ export default function Account() {
             <div style={{ marginTop: 14 }}><button type="submit" className="primary" disabled={password.isPending}>Change password</button></div>
           </form>
         </section>
+
+        <TwoFactor onSessionsChanged={() => sessions.refetch()} />
 
         <section className="card">
           <div className="card-head">

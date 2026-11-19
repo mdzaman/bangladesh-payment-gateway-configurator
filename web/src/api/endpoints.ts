@@ -4,8 +4,8 @@ import { del, get, patch, post, put } from "./client";
 import type {
   AdminWorkspace, ApiKey, AuditEntry, Catalog, CheckoutOption, CheckoutSession, ChecklistItem, Delivery, EnvSettings,
   EventPayload, GatewayListing, GatewayState, Invitation, InvitationPreview, Me, Member, Mode, Order, OrderDetail,
-  Overview, Paged, PaymentLink, Platform, RefundResponse, Role, SessionInfo, TestResult, User, WebhookEndpoint,
-  Workspace,
+  Overview, Paged, PaymentLink, Platform, RefundResponse, Role, SecondFactor, SessionInfo, TestResult,
+  TwoFactorChallenge, TwoFactorSetup, TwoFactorStatus, User, WebhookEndpoint, Workspace,
 } from "./types";
 
 export interface Env {
@@ -26,7 +26,10 @@ export const auth = {
   me: () => get<Me>("/api/auth/me"),
   signup: (body: { email: string; password: string; name: string; workspace_name?: string; invite_token?: string }) =>
     post<Me>("/api/auth/signup", body),
-  login: (email: string, password: string) => post<Me>("/api/auth/login", { email, password }),
+  /** Signed in (Me), or for a two-factor account a challenge to finish with `loginTwoFactor`. */
+  login: (email: string, password: string) => post<Me | TwoFactorChallenge>("/api/auth/login", { email, password }),
+  loginTwoFactor: (challenge: string, factor: SecondFactor) =>
+    post<Me>("/api/auth/login/two-factor", { challenge, ...factor }),
   logout: () => post<{ ok: true }>("/api/auth/logout"),
   verifyEmail: (token: string) => post<{ ok: true; email: string }>("/api/auth/verify-email", { token }),
   resendVerification: () => post<{ ok: true }>("/api/auth/resend-verification"),
@@ -39,6 +42,19 @@ export const auth = {
   revokeOtherSessions: () => post<{ ok: true }>("/api/auth/sessions/revoke-others"),
   invitation: (token: string) => get<InvitationPreview>("/api/auth/invitation", { token }),
   acceptInvitation: (token: string) => post<Workspace>("/api/auth/accept-invitation", { token }),
+};
+
+// --------------------------------------------------------------- two-factor
+export const twoFactor = {
+  status: () => get<TwoFactorStatus>("/api/auth/two-factor"),
+  /** Starts a set-up. The secret is in this answer and in no other. */
+  setup: (current_password: string) => post<TwoFactorSetup>("/api/auth/two-factor/setup", { current_password }),
+  /** Switches it on. The recovery codes are in this answer and in no other. */
+  confirm: (code: string) => post<{ enabled: true; recovery_codes: string[] }>("/api/auth/two-factor/confirm", { code }),
+  disable: (current_password: string, factor: SecondFactor) =>
+    post<{ enabled: false }>("/api/auth/two-factor/disable", { current_password, ...factor }),
+  newRecoveryCodes: (current_password: string, factor: SecondFactor) =>
+    post<{ recovery_codes: string[] }>("/api/auth/two-factor/recovery-codes", { current_password, ...factor }),
 };
 
 // --------------------------------------------------------------- workspaces

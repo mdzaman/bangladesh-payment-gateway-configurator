@@ -141,6 +141,38 @@ def dash(new_client):
     return d
 
 
+class Clock:
+    """The time authenticator codes are checked against, under the test's control."""
+
+    def __init__(self):
+        import time
+
+        self.t = time.time()
+
+    def __call__(self) -> float:
+        return self.t
+
+    def tick(self, steps: int = 1) -> Clock:
+        """Move on by whole 30-second steps, so the app would show a new code."""
+        self.t += 30 * steps
+        return self
+
+    def code(self, secret: str) -> str:
+        """What the authenticator app shows right now."""
+        from bdpay_cloud.security import totp
+
+        return totp.code_at(secret, self.t)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    from bdpay_cloud.security import totp
+
+    c = Clock()
+    monkeypatch.setattr(totp, "now", c)
+    return c
+
+
 @pytest.fixture
 def provider(rt):
     """Route provider HTTP to a fake: ``provider(handler)``. Restored afterwards."""

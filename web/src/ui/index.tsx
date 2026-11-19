@@ -5,7 +5,7 @@ import {
   type ReactNode,
 } from "react";
 import { ApiError, errorMessage } from "../api/client";
-import type { GatewayStatus, OrderStatus } from "../api/types";
+import type { GatewayStatus, OrderStatus, SecondFactor } from "../api/types";
 import { GATEWAY_STATUS, STATUS_LABEL, STATUS_TONE, ago, splitCode, when } from "../lib/format";
 
 // -------------------------------------------------------------------- text
@@ -89,6 +89,44 @@ export function TextField({ label, help, error, required, value, onChange, type 
       <input id={id} type={type} value={value} required={required} aria-invalid={error ? true : undefined}
         onChange={(e) => onChange(e.target.value)} {...rest} />
     </Field>
+  );
+}
+
+/** What someone is typing as their second factor: the app's code, or a recovery code instead. */
+export interface FactorInput {
+  kind: "code" | "recovery_code";
+  value: string;
+}
+
+export const NO_FACTOR: FactorInput = { kind: "code", value: "" };
+
+export function asSecondFactor(factor: FactorInput): SecondFactor {
+  return factor.kind === "code" ? { code: factor.value.trim() } : { recovery_code: factor.value.trim() };
+}
+
+/** The second step of proving who you are, with the way out for a lost or dead phone. */
+export function SecondFactorField({ factor, onChange, autoFocus }: {
+  factor: FactorInput; onChange: (factor: FactorInput) => void; autoFocus?: boolean;
+}) {
+  const recovery = factor.kind === "recovery_code";
+  const type = (value: string) => onChange({ ...factor, value });
+  return (
+    <>
+      {recovery ? (
+        <TextField key="recovery" label="Recovery code" help="One of the codes you saved when you switched two-factor on. Each works once."
+          value={factor.value} onChange={type} required autoComplete="off" autoCapitalize="none" spellCheck={false}
+          placeholder="xxxxx-xxxxx" className="otp" autoFocus={autoFocus} />
+      ) : (
+        <TextField key="code" label="6-digit code" help="From your authenticator app. It changes every 30 seconds."
+          value={factor.value} onChange={type} required inputMode="numeric" autoComplete="one-time-code" maxLength={12}
+          placeholder="123456" className="otp" autoFocus={autoFocus} />
+      )}
+      <p className="small" style={{ margin: "6px 0 0" }}>
+        <button type="button" className="bare" onClick={() => onChange({ kind: recovery ? "code" : "recovery_code", value: "" })}>
+          {recovery ? "Use the authenticator app instead" : "Cannot use your phone? Enter a recovery code"}
+        </button>
+      </p>
+    </>
   );
 }
 

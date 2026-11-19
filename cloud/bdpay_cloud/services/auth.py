@@ -1,26 +1,55 @@
-"""Accounts, dashboard sessions, email verification and password reset."""
+"""Accounts, dashboard sessions, email verification, password reset and
+two-factor sign-in.
+
+Sign-in has one step, or two for an account with two-factor authentication
+switched on::
+
+    login()           email + password      -> a session, or a short-lived challenge
+    complete_login()  challenge + one code  -> a session
+
+A challenge opens nothing by itself. The second step takes a code from an
+authenticator app (TOTP) or one of the single-use recovery codes. Wrong
+passwords and wrong codes feed the same counter, wherever they are typed, so
+the account locks after ``MAX_FAILED_LOGINS`` of either.
+
+Everything that changes how an account signs in (a sign-in itself, a new
+password, two-factor on or off) first locks the account's row, then touches
+its sessions, then its sign-in challenges. One order for all of them, so two
+such requests for one account wait for each other instead of deadlocking, and
+never both spend the same code.
+"""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..crypto import Vault, VaultError, aad_totp
 from ..db import utcnow
 from ..errors import ServiceError
-from ..ids import new_id, new_secret, sha256_hex
-from ..models import EmailToken, User, UserSession, Workspace
-from ..security import passwords
+from ..ids import new_id, new_secret, rand_b32, sha256_hex
+from ..models import EmailToken, LoginChallenge, RecoveryCode, User, UserSession, Workspace
+from ..security import passwords, totp
 from ..settings import Settings
 from . import mailer, workspaces
+
+log = logging.getLogger("bdpay_cloud.auth")
 
 VERIFY_HOURS = 48
 RESET_MINUTES = 60
 MAX_FAILED_LOGINS = 8
 LOCK_MINUTES = 15
+# How long the second step of a sign-in may take after the password was accepted.
+CHALLENGE_MINUTES = 5
+# How long a started two-factor set-up waits for its first code.
+TOTP_SETUP_MINUTES = 15
+RECOVERY_CODES = 10
+RECOVERY_CODE_CHARS = 10  # Crockford base32, shown as xxxxx-xxxxx: 50 bits each
 
 
 class AuthError(ServiceError):
@@ -30,6 +59,9 @@ class AuthError(ServiceError):
 
 
 BAD_LOGIN = AuthError("Invalid email or password", 401, "UNAUTHENTICATED")
+CHALLENGE_EXPIRED = AuthError(
+    "That sign-in has expired. Enter your email and password again.", 401, "CHALLENGE_EXPIRED"
+)
 
 
 def cookie_name(settings: Settings) -> str:
@@ -48,6 +80,24 @@ class SignupResult:
     workspace: Workspace | None
     session: UserSession
     token: str
+
+
+@dataclass
+class LoginResult:
+    """A session, or (two-factor accounts, after the password) a challenge for
+    the second step. ``method`` says what completed a two-step sign-in."""
+
+    user: User
+    session: UserSession | None = None
+    token: str = ""
+    challenge: str = ""
+    method: str = "password"
+
+
+@dataclass
+class TwoFactorSetup:
+    secret: str
+    uri: str
 
 
 # ------------------------------------------------------------------- sessions
@@ -90,10 +140,66 @@ def logout(db: Session, token: str) -> None:
 
 
 def revoke_sessions(db: Session, user_id: str, keep: str | None = None) -> None:
+    # The account before its sessions, whether or not the caller holds it already.
+    # Only the lock: callers have changes to the account pending that a re-read would undo.
+    db.execute(select(User.id).where(User.id == user_id).with_for_update(key_share=True))
     q = update(UserSession).where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
     if keep:
         q = q.where(UserSession.id != keep)
     db.execute(q.values(revoked_at=utcnow()))
+
+
+# ------------------------------------------ the account row, failed attempts
+def _lock_account(db: Session, user_id: str) -> User | None:
+    """The account row, locked for this transaction and read afresh.
+
+    FOR NO KEY UPDATE, not FOR UPDATE: it shuts out every other change to the
+    same account, which is the point, but not rows that merely refer to it. A
+    new session or a new emailed link only needs the account to go on existing.
+    FOR UPDATE would make those wait too, and a password reset would then
+    deadlock with a second "forgot password" for the same account."""
+    return db.get(User, user_id, with_for_update={"key_share": True}, populate_existing=True)
+
+
+def _refuse_if_locked(user: User, now: datetime) -> None:
+    if user.locked_until is not None and user.locked_until > now:
+        raise AuthError("Too many failed attempts. Try again in a few minutes.", 429, "RATE_LIMITED")
+
+
+def _count_failure(db: Session, user: User, now: datetime) -> None:
+    """One more wrong password or wrong code. Added up in the database, in one
+    statement, so guesses sent in parallel are each counted; the account locks
+    at the limit. Committed, so the count outlives the request that fails."""
+    reached = User.failed_logins + 1 >= MAX_FAILED_LOGINS
+    db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(
+            locked_until=case((reached, now + timedelta(minutes=LOCK_MINUTES)), else_=User.locked_until),
+            failed_logins=case((reached, 0), else_=User.failed_logins + 1),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+
+
+def _locked_user(db: Session, user_id: str) -> tuple[User, datetime]:
+    """A signed-in person's own account, locked, for a change that asks for the
+    password or a code again. A locked-out account is turned away here too."""
+    user = _lock_account(db, user_id)
+    if user is None:
+        raise AuthError("Sign in to continue", 401, "UNAUTHENTICATED")
+    now = utcnow()
+    _refuse_if_locked(user, now)
+    return user, now
+
+
+def _need_password(db: Session, user: User, password: str, now: datetime) -> None:
+    """The password, asked for again from someone already signed in. A wrong one
+    counts as it does at sign-in: an open session is not a place to guess it."""
+    if not passwords.verify_password(user.password_hash, password):
+        _count_failure(db, user, now)
+        raise AuthError("Your current password is not correct", 400)
 
 
 # -------------------------------------------------------------- email tokens
@@ -143,13 +249,20 @@ def request_password_reset(db: Session, settings: Settings, email: str) -> None:
 
 def reset_password(db: Session, token: str, new_password: str) -> User:
     user = _consume(db, token, "reset_password")
+    # The account row before anything of the account's changes, and its state as it is under that lock.
+    user = _lock_account(db, user.id) if user is not None else None
     if user is None:
         raise AuthError("This reset link is invalid or has expired", 400)
     problem = passwords.password_problem(new_password, email=user.email, name=user.name)
     if problem:
         raise AuthError(problem)
-    user.password_hash = passwords.hash_password(new_password)
-    user.failed_logins, user.locked_until, user.updated_at = 0, None, utcnow()
+    user.password_hash, user.updated_at = passwords.hash_password(new_password), utcnow()
+    # The emailed link stands in for the password, so it clears a lock earned by
+    # wrong passwords. It does not stand in for the second factor: with two-factor
+    # on, wrong codes are counted too, and someone who has got into the mailbox
+    # must not be able to wipe that count and keep guessing.
+    if user.totp_enabled_at is None:
+        user.failed_logins, user.locked_until = 0, None
     # Using the emailed link also proves the address.
     if user.email_verified_at is None:
         user.email_verified_at = utcnow()
@@ -157,13 +270,13 @@ def reset_password(db: Session, token: str, new_password: str) -> User:
     return user
 
 
-def change_password(db: Session, user: User, current: str, new: str, keep_session: str | None) -> None:
-    if not passwords.verify_password(user.password_hash, current):
-        raise AuthError("Your current password is not correct", 400)
+def change_password(db: Session, user_id: str, current: str, new: str, keep_session: str | None) -> None:
+    user, now = _locked_user(db, user_id)
+    _need_password(db, user, current, now)
     problem = passwords.password_problem(new, email=user.email, name=user.name)
     if problem:
         raise AuthError(problem)
-    user.password_hash, user.updated_at = passwords.hash_password(new), utcnow()
+    user.password_hash, user.updated_at = passwords.hash_password(new), now
     revoke_sessions(db, user.id, keep=keep_session)
 
 
@@ -224,24 +337,292 @@ def signup(
 
 def login(
     db: Session, settings: Settings, *, email: str, password: str, ip: str | None = None, user_agent: str | None = None
-) -> tuple[User, UserSession, str]:
+) -> LoginResult:
     user = db.scalar(select(User).where(User.email == normalize_email(email)))
     if user is None:
         passwords.burn(password)
         raise BAD_LOGIN
     now = utcnow()
-    if user.locked_until is not None and user.locked_until > now:
-        raise AuthError("Too many failed attempts. Try again in a few minutes.", 429, "RATE_LIMITED")
-    if not passwords.verify_password(user.password_hash, password):
-        user.failed_logins += 1
-        if user.failed_logins >= MAX_FAILED_LOGINS:
-            user.failed_logins, user.locked_until = 0, now + timedelta(minutes=LOCK_MINUTES)
-        db.commit()  # keep the counter even though the request fails
+    _refuse_if_locked(user, now)
+    checked = user.password_hash
+    if not passwords.verify_password(checked, password):
+        _count_failure(db, user, now)
         raise BAD_LOGIN
+    # Checking a password is slow on purpose, and the row was not locked for it.
+    # Take the account now and look again: other guesses sent at the same moment
+    # may have locked it, or the password may have been changed, in the meantime.
+    user = _lock_account(db, user.id)
+    now = utcnow()
+    if user is None:
+        raise BAD_LOGIN
+    # A different hash is a new password, or the same one re-hashed by a sign-in
+    # that finished a moment earlier. Only the first is a reason to refuse.
+    if user.password_hash != checked and not passwords.verify_password(user.password_hash, password):
+        raise BAD_LOGIN
+    _refuse_if_locked(user, now)
     if user.disabled_at is not None:
         raise AuthError("This account is disabled", 403, "FORBIDDEN")
-    user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
     if passwords.needs_rehash(user.password_hash):
         user.password_hash = passwords.hash_password(password)
+    if user.totp_enabled_at is not None:
+        # The password is half of this sign-in. No session yet, and the failure
+        # count stays as it is: if a correct password reset it, someone who knows
+        # the password could guess codes for ever, seven at a time.
+        return LoginResult(user, challenge=_issue_challenge(db, user, now))
+    user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
     session, token = create_session(db, settings, user, ip, user_agent)
-    return user, session, token
+    return LoginResult(user, session, token)
+
+
+# ------------------------------------------------------- two-step sign-in
+def _password_tag(user: User) -> str:
+    """Ties a challenge to the password it was issued for. Change or reset the
+    password and every outstanding challenge stops working, with nothing to
+    remember to revoke."""
+    return sha256_hex(user.password_hash)
+
+
+def _issue_challenge(db: Session, user: User, now: datetime) -> str:
+    token = new_secret(32)
+    db.add(
+        LoginChallenge(
+            id=sha256_hex(token),
+            user_id=user.id,
+            password_tag=_password_tag(user),
+            expires_at=now + timedelta(minutes=CHALLENGE_MINUTES),
+        )
+    )
+    return token
+
+
+def challenge_account(db: Session, challenge: str) -> str | None:
+    """The email a challenge belongs to, so the second step can share the
+    per-account rate limit of the first. Reads only."""
+    return db.scalar(
+        select(User.email)
+        .join(LoginChallenge, LoginChallenge.user_id == User.id)
+        .where(LoginChallenge.id == sha256_hex(challenge or ""))
+    )
+
+
+def complete_login(
+    db: Session,
+    settings: Settings,
+    vault: Vault,
+    *,
+    challenge: str,
+    code: str | None = None,
+    recovery_code: str | None = None,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> LoginResult:
+    """Second step: a challenge from ``login`` plus a TOTP code or a recovery code."""
+    challenge_id = sha256_hex(challenge or "")
+    user_id = db.scalar(select(LoginChallenge.user_id).where(LoginChallenge.id == challenge_id))
+    # The account row is locked before anything is checked, so two requests can
+    # never both spend the same challenge, the same code or the same recovery code.
+    user = _lock_account(db, user_id) if user_id else None
+    row = db.get(LoginChallenge, challenge_id) if user else None
+    now = utcnow()
+    if (
+        user is None
+        or row is None
+        or row.used_at is not None
+        or row.expires_at <= now
+        or row.password_tag != _password_tag(user)
+        or user.totp_enabled_at is None
+        or user.disabled_at is not None
+    ):
+        raise CHALLENGE_EXPIRED
+    _refuse_if_locked(user, now)
+    method = _check_second_factor(db, vault, user, code=code, recovery_code=recovery_code, now=now, signing_in=True)
+    row.used_at = now
+    user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
+    session, token = create_session(db, settings, user, ip, user_agent)
+    return LoginResult(user, session, token, method=method)
+
+
+# ------------------------------------------------------------- two-factor
+_RECOVERY_ALPHABET = frozenset("0123456789abcdefghjkmnpqrstvwxyz")
+# Crockford base32 leaves out the letters that read as digits; take them as those digits.
+_LOOKALIKES = str.maketrans("oil", "011")
+
+
+def _clean_recovery_code(code: str) -> str | None:
+    """What someone typed -> the form that was hashed, or None if it cannot be one."""
+    text = "".join((code or "").lower().replace("-", "").split()).translate(_LOOKALIKES)
+    return text if len(text) == RECOVERY_CODE_CHARS and _RECOVERY_ALPHABET.issuperset(text) else None
+
+
+def _totp_secret(vault: Vault, user: User) -> str:
+    try:
+        return vault.decrypt_text(user.totp_secret_enc or "", aad_totp(user.id))
+    except VaultError:
+        # A key was dropped from the ring before `rotate-keys` had re-encrypted this row.
+        log.error("the two-factor secret of %s cannot be decrypted with the current key ring", user.id)
+        raise AuthError(
+            "Codes from your authenticator app cannot be checked right now. Use a recovery code, or ask "
+            "whoever runs this service.",
+            503,
+            "UNAVAILABLE",
+        ) from None
+
+
+def _check_second_factor(
+    db: Session,
+    vault: Vault,
+    user: User,
+    *,
+    code: str | None,
+    recovery_code: str | None,
+    now: datetime,
+    signing_in: bool = False,
+) -> str:
+    """Check a TOTP code or a recovery code for an account whose row the caller
+    has locked. Returns ``"totp"`` or ``"recovery_code"``. A wrong one counts
+    towards the lock-out; something that cannot be a code at all does not."""
+    # 401 only while signing in: on a signed-in page the dashboard reads 401 as "your session ended".
+    wrong = (401, "UNAUTHENTICATED") if signing_in else (400, "VALIDATION")
+    if bool(code) == bool(recovery_code):
+        raise AuthError("Enter the code from your authenticator app, or one recovery code")
+    if code:
+        digits = totp.clean_code(code)
+        if digits is None:
+            raise AuthError(f"Enter the {totp.DIGITS}-digit code from your authenticator app")
+        step = totp.match(_totp_secret(vault, user), digits)
+        if step is None:
+            _count_failure(db, user, now)
+            raise AuthError("That code is not correct. Enter the newest code from your authenticator app.", *wrong)
+        if user.totp_last_step is not None and step <= user.totp_last_step:
+            _count_failure(db, user, now)
+            raise AuthError(
+                "That code has already been used. Wait for your authenticator app to show the next one.", *wrong
+            )
+        user.totp_last_step = step
+        return "totp"
+    candidate = _clean_recovery_code(recovery_code or "")
+    if candidate is None:
+        raise AuthError("That does not look like a recovery code. They have ten characters, like abcde-12345.")
+    unused = select(RecoveryCode).where(RecoveryCode.user_id == user.id, RecoveryCode.used_at.is_(None))
+    for row in db.scalars(unused.order_by(RecoveryCode.id)):
+        if passwords.verify_password(row.code_hash, candidate):
+            row.used_at = now
+            return "recovery_code"
+    _count_failure(db, user, now)
+    raise AuthError("That recovery code is not correct, or it has been used already.", *wrong)
+
+
+def _new_recovery_codes(db: Session, user: User) -> list[str]:
+    """Replace the account's recovery codes. The return value is the only time
+    they exist in readable form."""
+    db.flush()  # a code spent a moment ago is written before its row is replaced
+    db.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user.id))
+    codes = [rand_b32(RECOVERY_CODE_CHARS) for _ in range(RECOVERY_CODES)]
+    db.add_all([RecoveryCode(user_id=user.id, code_hash=passwords.hash_password(code)) for code in codes])
+    return [f"{code[:5]}-{code[5:]}" for code in codes]
+
+
+def recovery_codes_left(db: Session, user_id: str) -> int:
+    db.flush()  # sessions here do not autoflush, and a code may have been spent a moment ago
+    unused = select(func.count()).select_from(RecoveryCode)
+    return db.scalar(unused.where(RecoveryCode.user_id == user_id, RecoveryCode.used_at.is_(None))) or 0
+
+
+def setup_pending(user: User, now: datetime | None = None) -> bool:
+    """A set-up was started, has not been confirmed, and has not run out of time."""
+    return (
+        user.totp_enabled_at is None
+        and user.totp_secret_enc is not None
+        and user.totp_started_at is not None
+        and (now or utcnow()) - user.totp_started_at <= timedelta(minutes=TOTP_SETUP_MINUTES)
+    )
+
+
+def begin_two_factor(db: Session, vault: Vault, settings: Settings, user_id: str, password: str) -> TwoFactorSetup:
+    """Start a set-up: make a secret and hand it over, once, for the authenticator
+    app. Nothing changes about signing in until ``confirm_two_factor``. Starting
+    again replaces the secret of an unfinished attempt."""
+    user, now = _locked_user(db, user_id)
+    if user.totp_enabled_at is not None:
+        raise AuthError("Two-factor authentication is already on for this account", 409, "DUPLICATE")
+    # Asked again here, although the caller is signed in: a session left open on
+    # a shared computer must not be enough to tie the account to someone's phone.
+    _need_password(db, user, password, now)
+    secret = totp.new_secret()
+    user.totp_secret_enc = vault.encrypt(secret, aad_totp(user.id))
+    user.totp_started_at, user.totp_last_step, user.updated_at = now, None, now
+    return TwoFactorSetup(secret, totp.provisioning_uri(secret, account=user.email, issuer=settings.brand_name))
+
+
+def confirm_two_factor(db: Session, vault: Vault, user_id: str, code: str, keep_session: str | None) -> list[str]:
+    """Finish a set-up with the first code from the app. From here on signing in
+    needs the second step. Returns the recovery codes; other sessions end."""
+    user, now = _locked_user(db, user_id)
+    if user.totp_enabled_at is not None:
+        raise AuthError("Two-factor authentication is already on for this account", 409, "DUPLICATE")
+    if not setup_pending(user, now):
+        raise AuthError("This set-up has expired or was never started. Start it again.")
+    digits = totp.clean_code(code)
+    if digits is None:
+        raise AuthError(f"Enter the {totp.DIGITS}-digit code from your authenticator app")
+    step = totp.match(_totp_secret(vault, user), digits)
+    if step is None:
+        _count_failure(db, user, now)
+        raise AuthError(
+            "That code is not correct. Check that the time on your phone is set automatically, then enter the "
+            "newest code."
+        )
+    # The confirming code counts as used: it cannot also open a sign-in.
+    user.totp_enabled_at, user.totp_last_step, user.updated_at = now, step, now
+    codes = _new_recovery_codes(db, user)
+    revoke_sessions(db, user.id, keep=keep_session)
+    return codes
+
+
+def _clear_two_factor(db: Session, user: User) -> None:
+    db.flush()
+    db.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user.id))
+    user.totp_secret_enc = user.totp_started_at = user.totp_enabled_at = user.totp_last_step = None
+    user.updated_at = utcnow()
+
+
+def disable_two_factor(
+    db: Session,
+    vault: Vault,
+    user_id: str,
+    *,
+    password: str,
+    code: str | None,
+    recovery_code: str | None,
+    keep_session: str | None,
+) -> None:
+    """Switch two-factor off. Needs the password and the second factor itself,
+    so neither a stolen session nor a stolen password is enough."""
+    user, now = _locked_user(db, user_id)
+    if user.totp_enabled_at is None:
+        raise AuthError("Two-factor authentication is not on for this account")
+    _need_password(db, user, password, now)
+    _check_second_factor(db, vault, user, code=code, recovery_code=recovery_code, now=now)
+    _clear_two_factor(db, user)
+    revoke_sessions(db, user.id, keep=keep_session)
+
+
+def regenerate_recovery_codes(
+    db: Session, vault: Vault, user_id: str, *, password: str, code: str | None, recovery_code: str | None
+) -> list[str]:
+    """A new set of recovery codes; every earlier one stops working."""
+    user, now = _locked_user(db, user_id)
+    if user.totp_enabled_at is None:
+        raise AuthError("Two-factor authentication is not on for this account")
+    _need_password(db, user, password, now)
+    _check_second_factor(db, vault, user, code=code, recovery_code=recovery_code, now=now)
+    return _new_recovery_codes(db, user)
+
+
+def remove_two_factor(db: Session, user: User) -> None:
+    """The operator's way out (``bdpay-cloud disable-two-factor``) for someone
+    who has lost both the authenticator and the recovery codes. Ends every
+    session and unfinished sign-in; the password is untouched."""
+    _clear_two_factor(db, user)
+    db.execute(delete(LoginChallenge).where(LoginChallenge.user_id == user.id))
+    revoke_sessions(db, user.id)

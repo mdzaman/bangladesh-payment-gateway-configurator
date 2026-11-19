@@ -83,6 +83,15 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(TS)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
     updated_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
+    # Two-factor sign-in (TOTP). The shared secret is encrypted and bound to this
+    # row. It counts only once ``totp_enabled_at`` is set: until then it is an
+    # enrolment that was started (``totp_started_at``) and not yet confirmed.
+    totp_secret_enc: Mapped[str | None] = mapped_column(Text)
+    totp_started_at: Mapped[datetime | None] = mapped_column(TS)
+    totp_enabled_at: Mapped[datetime | None] = mapped_column(TS)
+    # The newest time-step a code was accepted for. Nothing at or before it is
+    # accepted again, which is what makes a code single-use.
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
     __table_args__ = (CheckConstraint("email = lower(email)", name="email_lower"),)
 
 
@@ -112,6 +121,33 @@ class EmailToken(Base):
     used_at: Mapped[datetime | None] = mapped_column(TS)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
     __table_args__ = (CheckConstraint(_in("purpose", ("verify_email", "reset_password")), name="purpose"),)
+
+
+class RecoveryCode(Base):
+    """A single-use sign-in code for when the authenticator app is out of reach.
+    Short enough to type, so it is stored the way passwords are: Argon2id only."""
+
+    __tablename__ = "recovery_codes"
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    code_hash: Mapped[str] = mapped_column(Text)
+    used_at: Mapped[datetime | None] = mapped_column(TS)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
+
+
+class LoginChallenge(Base):
+    """A sign-in that has passed the password and still owes the second factor.
+    ``id`` is the SHA-256 of the token the browser holds. It is good for that
+    one step, once, for a few minutes, and only while the password it was
+    issued for is still the account's password (``password_tag``)."""
+
+    __tablename__ = "login_challenges"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    password_tag: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(TS)
+    used_at: Mapped[datetime | None] = mapped_column(TS)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
 
 
 # ------------------------------------------------------------------- tenancy
