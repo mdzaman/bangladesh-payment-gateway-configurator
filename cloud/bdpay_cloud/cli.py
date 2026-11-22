@@ -7,6 +7,7 @@ doctor         check configuration, database, keys, clock
 gen-key        print a new master key entry for BDPAY_CLOUD_MASTER_KEYS
 rotate-keys    re-encrypt stored secrets with the first key in the ring
 create-user    create an account (the way in when sign-up is closed)
+disable-two-factor  switch two-factor sign-in off for someone who lost their phone and codes
 openapi        print the OpenAPI document of the merchant API
 """
 
@@ -21,7 +22,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, text
 
 from . import __version__, logs, migrate
-from .crypto import Vault, VaultError, aad_callback_secret, aad_gateway, aad_webhook_secret, generate_key_entry
+from .crypto import (
+    Vault,
+    VaultError,
+    aad_callback_secret,
+    aad_gateway,
+    aad_totp,
+    aad_webhook_secret,
+    generate_key_entry,
+)
 from .db import make_engine, ping, session_scope
 from .settings import ConfigError, Settings, get_settings
 
@@ -179,7 +188,12 @@ def cmd_rotate_keys(_args) -> int:
     settings = _settings()
     vault = Vault.from_spec(settings.effective_master_keys)
     engine = make_engine(settings, pool_size=1)
-    counts = {"environment secret(s)": 0, "gateway configuration(s)": 0, "webhook secret(s)": 0}
+    counts = {
+        "environment secret(s)": 0,
+        "gateway configuration(s)": 0,
+        "webhook secret(s)": 0,
+        "two-factor secret(s)": 0,
+    }
     unreadable: list[str] = []
 
     def rotate(token: str, aad: str, label: str, what: str) -> str | None:
@@ -234,6 +248,12 @@ def cmd_rotate_keys(_args) -> int:
             )
             if v:
                 conn.execute(text("UPDATE webhook_endpoints SET secret_enc = :v WHERE id = :id"), {"v": v, "id": r.id})
+        for r in conn.execute(
+            text("SELECT id, totp_secret_enc FROM users WHERE totp_secret_enc IS NOT NULL FOR NO KEY UPDATE")
+        ).all():
+            v = rotate(r.totp_secret_enc, aad_totp(r.id), f"two-factor secret of {r.id}", "two-factor secret(s)")
+            if v:
+                conn.execute(text("UPDATE users SET totp_secret_enc = :v WHERE id = :id"), {"v": v, "id": r.id})
         # Cached provider tokens are disposable: drop them and let them be fetched again.
         conn.execute(text("DELETE FROM provider_tokens"))
     print(f"re-encrypted with key '{vault.primary}': " + ", ".join(f"{n} {what}" for what, n in counts.items()))
@@ -292,6 +312,36 @@ def cmd_create_user(args) -> int:
             f"({ws.slug})"
         )
     rt.close()
+    return 0
+
+
+def cmd_disable_two_factor(args) -> int:
+    """The operator's way to let someone back in who has lost both their
+    authenticator and their recovery codes. Check who is asking first: this
+    removes the second factor from the account."""
+    from .context import Actor
+    from .engine.runtime import Runtime
+    from .models import User
+    from .services import audit, auth, mailer
+
+    rt = Runtime(_settings())
+    email = args.email.strip().lower()
+    try:
+        with session_scope(rt.sessions) as db:
+            user = db.scalar(select(User).where(User.email == email).with_for_update(**auth.ACCOUNT_LOCK))
+            if user is None:
+                print("✗ no account with this email", file=sys.stderr)
+                return 1
+            if user.totp_secret_enc is None and user.totp_enabled_at is None:
+                print(f"two-factor sign-in is not on for {email}: nothing to do")
+                return 0
+            auth.clear_two_factor(db, user)
+            auth.revoke_sessions(db, user.id)
+            audit.record(db, Actor.system("cli"), "user.two_factor_reset", target_type="user", target_id=user.id)
+            mailer.send_security_notice(db, rt.settings, user.email, "two_factor_reset")
+    finally:
+        rt.close()
+    print(f"two-factor sign-in is off for {email}. They sign in with their password and can set it up again.")
     return 0
 
 
@@ -388,6 +438,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--platform-admin", action="store_true")
     p.add_argument("--password-stdin", action="store_true", help="read the password from standard input")
     p.set_defaults(fn=cmd_create_user)
+
+    p = sub.add_parser(
+        "disable-two-factor", help="switch two-factor sign-in off for an account (lost phone and recovery codes)"
+    )
+    p.add_argument("--email", required=True)
+    p.set_defaults(fn=cmd_disable_two_factor)
 
     p = sub.add_parser("seed-demo", help="development: fill a workspace's sandbox with simulator payments")
     p.add_argument("--workspace", required=True, help="workspace address (the slug in its dashboard URL)")

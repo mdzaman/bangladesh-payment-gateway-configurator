@@ -1,10 +1,11 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import * as api from "../../api/endpoints";
 import { useSession } from "../../lib/session";
 import { Brand } from "../../layout/Shell";
 import { ErrorNote, FormError, Loading, PageHead, Pill, TextField, Time, useToast } from "../../ui";
+import TwoFactorCard from "./TwoFactor";
 
 export default function Account() {
   const { me, refresh } = useSession();
@@ -20,6 +21,11 @@ export default function Account() {
   });
   const revoke = useMutation({ mutationFn: api.auth.revokeOtherSessions, onSuccess: () => { sessions.refetch(); toast("Signed out everywhere else"); } });
   const resend = useMutation({ mutationFn: api.auth.resendVerification, onSuccess: () => toast("Confirmation email sent") });
+  // Links such as /account#two-factor land on that section.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (hash) document.getElementById(hash.slice(1))?.scrollIntoView();
+  }, [hash]);
   if (!me) return null;
   return (
     <div className="band">
@@ -54,13 +60,15 @@ export default function Account() {
           </form>
         </section>
 
+        <TwoFactorCard />
+
         <section className="card">
           <div className="card-head">
             <h2>Signed-in devices</h2>
             <button type="button" className="small quiet" disabled={revoke.isPending} onClick={() => revoke.mutate()}>Sign out everywhere else</button>
           </div>
           {sessions.isPending ? <Loading /> : sessions.error ? <ErrorNote error={sessions.error} /> : (
-            <table>
+            <div className="scroll"><table>
               <thead><tr><th>Device</th><th>Address</th><th>Last active</th></tr></thead>
               <tbody>
                 {sessions.data.data.map((s, i) => (
@@ -71,7 +79,7 @@ export default function Account() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           )}
         </section>
       </div>

@@ -28,6 +28,24 @@ class LoginIn(Body):
     password: str = Field(max_length=200)
 
 
+class TwoFactorLoginIn(Body):
+    challenge: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=40)
+
+
+class PasswordIn(Body):
+    current_password: str = Field(max_length=200)
+
+
+class CodeIn(Body):
+    code: str = Field(min_length=1, max_length=40)
+
+
+class PasswordCodeIn(Body):
+    current_password: str = Field(max_length=200)
+    code: str = Field(min_length=1, max_length=40)
+
+
 class TokenIn(Body):
     token: str = Field(min_length=1, max_length=200)
 
@@ -61,6 +79,8 @@ class WorkspacePatch(Body):
     support_email: str | None = Field(default=None, max_length=200)
     support_phone: str | None = Field(default=None, max_length=30)
     locale: str | None = Field(default=None, pattern="^(en|bn)$")
+    # Owners only: members need two-factor sign-in before they can change anything in live mode.
+    require_two_factor: bool | None = None
 
 
 class GoLiveIn(Body):

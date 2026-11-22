@@ -4,12 +4,12 @@ import base64
 
 from sqlalchemy import text
 
-from bdpay_cloud import cli
 from bdpay_cloud.crypto import Vault
 
 import helpers
-from conftest import TEST_DB, TEST_KEYS
+from conftest import TEST_KEYS
 from helpers import BKASH, Dash, bearer
+from helpers import run_cli as _cli
 
 
 def test_security_headers_and_request_ids(client, dash):
@@ -93,26 +93,6 @@ def test_dashboard_is_served_with_client_side_routing(tmp_path):
         assert c.get("/..%2f..%2fetc/passwd").status_code in (200, 404)
         assert "root:" not in c.get("/..%2f..%2fetc/passwd").text
     app.state.rt.close()
-
-
-def _cli(monkeypatch, capsys, *argv, keys=TEST_KEYS, **env):
-    from bdpay_cloud import settings as settings_module
-
-    settings_module.get_settings.cache_clear()
-    for k, v in {
-        "ENV": "test",
-        "DATABASE_URL": TEST_DB,
-        "MASTER_KEYS": keys,
-        "PUBLIC_URL": "https://pay.test",
-        "LOG_FORMAT": "text",
-        **env,
-    }.items():
-        monkeypatch.setenv(f"BDPAY_CLOUD_{k}", v)
-    monkeypatch.chdir("/")  # no stray .env file
-    code = cli.main(list(argv))
-    settings_module.get_settings.cache_clear()
-    out = capsys.readouterr()
-    return code, out.out, out.err
 
 
 def test_cli_doctor_migrate_and_gen_key(monkeypatch, capsys, engine):

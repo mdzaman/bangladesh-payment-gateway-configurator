@@ -49,7 +49,7 @@ export default function Links() {
       ) : undefined}>
         Hosted pages where your customer chooses how to pay. No code needed: create a link and share it.
       </PageHead>
-      <ReadOnlyNote show={!ctx.canWrite} live={ctx.mode === "live"} />
+      <ReadOnlyNote show={!ctx.canWrite} live={ctx.mode === "live"} twoFactor={ctx.needsTwoFactor} />
       {noMethods && <p className="info warn">No gateway is switched on, so a checkout page would have nothing to offer. <Link to={ctx.path("gateways")}>Connect one first.</Link></p>}
 
       <section className="card flush">

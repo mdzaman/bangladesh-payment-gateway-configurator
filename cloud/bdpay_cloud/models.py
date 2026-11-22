@@ -81,6 +81,15 @@ class User(Base):
     locked_until: Mapped[datetime | None] = mapped_column(TS)
     disabled_at: Mapped[datetime | None] = mapped_column(TS)
     last_login_at: Mapped[datetime | None] = mapped_column(TS)
+    # Two-factor sign-in. The TOTP secret is encrypted and is present from the
+    # start of set-up; the factor is on only once totp_enabled_at is set.
+    totp_secret_enc: Mapped[str | None] = mapped_column(Text)
+    totp_enabled_at: Mapped[datetime | None] = mapped_column(TS)
+    # When a set-up that is not confirmed yet was started; it expires a few
+    # minutes later (auth.SETUP_MINUTES). Empty once the factor is on.
+    totp_started_at: Mapped[datetime | None] = mapped_column(TS)
+    # The last 30-second step a code was accepted for: nothing at or before it works again.
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
     updated_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
     __table_args__ = (CheckConstraint("email = lower(email)", name="email_lower"),)
@@ -112,6 +121,29 @@ class EmailToken(Base):
     used_at: Mapped[datetime | None] = mapped_column(TS)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
     __table_args__ = (CheckConstraint(_in("purpose", ("verify_email", "reset_password")), name="purpose"),)
+
+
+class LoginChallenge(Base):
+    """The password was right and a second factor is still owed. No session
+    exists until it is given. ``id`` is the SHA-256 of the token the browser holds."""
+
+    __tablename__ = "login_challenges"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(TS)
+    used_at: Mapped[datetime | None] = mapped_column(TS)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
+
+
+class RecoveryCode(Base):
+    """Single-use sign-in codes for when the authenticator app is not at hand.
+    ``id`` is the SHA-256 of the user id and the code; the code itself is never stored."""
+
+    __tablename__ = "recovery_codes"
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(TS)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=NOW)
 
 
 # ------------------------------------------------------------------- tenancy

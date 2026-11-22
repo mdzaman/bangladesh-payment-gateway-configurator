@@ -27,7 +27,7 @@ export default function Developers() {
         {TABS.map(([id, label]) => <NavLink key={id} to={ctx.path(`developers/${id}`)} end
           aria-current={tab === id ? "page" : undefined}>{label}</NavLink>)}
       </nav>
-      <ReadOnlyNote show={!ctx.canWrite && tab !== "quickstart" && tab !== "events"} live={ctx.mode === "live"} />
+      <ReadOnlyNote show={!ctx.canWrite && tab !== "quickstart" && tab !== "events"} live={ctx.mode === "live"} twoFactor={ctx.needsTwoFactor} />
       {tab === "keys" && <Keys />}
       {tab === "webhooks" && <Webhooks />}
       {tab === "events" && <Events />}
